@@ -1,0 +1,13 @@
+# Discovery / assessment output (instance data — never commit)
+discovery/
+*-assessment-*/
+/tmp/
+*.csv
+
+# Secrets
+.env
+*.token
+
+# OS / editor
+.DS_Store
+*.swp

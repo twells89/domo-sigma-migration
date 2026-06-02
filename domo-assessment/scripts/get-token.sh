@@ -1,0 +1,1 @@
+../../domo-to-sigma/scripts/get-token.sh

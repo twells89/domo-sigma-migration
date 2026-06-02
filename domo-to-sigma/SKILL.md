@@ -1,0 +1,164 @@
+---
+name: domo-to-sigma
+description: >-
+  Convert a Domo dashboard (pages + cards + DataSets + Beast Modes) into a Sigma
+  data model and matching workbook. Use when the user has a Domo instance and
+  wants to recreate dashboards in Sigma. Discovery via Domo APIs, Beast Mode →
+  Sigma formula translation, data model + workbook creation via REST API, layout
+  generation, and parity verification — driven by `scripts/*.rb`.
+user-invocable: true
+---
+
+# Domo → Sigma Conversion
+
+> **STATUS: DRAFT / BLOCKED ON API ACCESS.** This skill is scaffolded from
+> research but not yet validated against a live Domo instance. The auth path and
+> the *public* API endpoints are documented and ready; the **private/internal
+> API** endpoints (card definitions, Beast Mode text, page layout) are
+> best-effort and must be confirmed on first contact with a real instance.
+> Design rationale + open questions live in `../research/domo-to-sigma.md`.
+> Before running for a customer, resolve the **Open questions** at the bottom.
+
+**Read ALL of the following before replying or taking any action:**
+- `../research/domo-to-sigma.md` — object model, API surface, scope, open questions
+- `refs/connection.md` — Domo auth (OAuth public API + developer access token for private API)
+- `refs/beast-mode-to-sigma.md` — Beast Mode (MySQL SQL) → Sigma formula mapping
+- The `tableau-to-sigma` skill's `refs/workbook-layout.md` and `refs/data-model-spec.md` — reused wholesale
+
+---
+
+## The one big idea
+
+**Beast Mode is MySQL-dialect SQL.** Domo's calc-field language routes straight
+through the existing `mcp__sigma-data-model__convert_sql_to_sigma_formula` tool —
+no bespoke parser like Power BI's DAX. The formula layer is nearly free. The work
+that remains is *extraction* (getting card defs + Beast Mode text + layout out of
+Domo) and *layout/binding* (cards → Sigma elements on a 24-col grid).
+
+---
+
+## Scripts
+
+| Script | Phase | Purpose |
+|---|---|---|
+| `scripts/get-token.sh` | prereq | OAuth2 client-credentials → public-API bearer token |
+| `scripts/lib/domo_rest.rb` | prereq | Domo REST wrapper (public + private), auto token refresh |
+| `scripts/domo-discover.rb` | 1 | Enumerate DataSets, pages, cards; pull schemas + (private) card defs + Beast Modes |
+| `scripts/convert-beast-modes.rb` | 2 | Beast Mode SQL → Sigma formula via `convert_sql_to_sigma_formula` |
+| `scripts/build-dm.rb` | 3 | DataSet schema + calc columns → Sigma DM spec |
+| `post-and-readback.rb` *(reuse from tableau-to-sigma)* | 4 | POST DM/WB + capture server element IDs |
+| `scripts/build-workbook.rb` | 5 | Card defs → Sigma chart/table/KPI elements |
+| `build-dashboard-layout.rb` *(reuse)* | 5d | Card geometry → 24-col grid XML |
+| `put-layout.rb` *(reuse)* | 5d | PUT layout to workbook |
+| `verify-parity.rb` *(reuse)* | 6 | Compare Domo `query/execute` aggregations vs Sigma `query` |
+| `assert-phase6-ran.rb` *(reuse)* | 6 | Hard gate before declaring GREEN |
+
+> Scripts marked *(reuse)* are symlinked/vendored from `tableau-to-sigma/scripts/`.
+> Scripts NOT marked reuse are Domo-specific and currently **stubs** — they
+> document the endpoint + expected shape with `TODO` markers to wire on access.
+
+---
+
+## Prerequisites
+
+### Sigma credentials
+```bash
+ruby ../tableau-to-sigma/scripts/setup.rb   # one-time
+eval "$(../tableau-to-sigma/scripts/get-token.sh)"
+```
+
+### Domo access — see `refs/connection.md`
+Two surfaces, both usually needed:
+1. **Public API** (`api.domo.com`) — OAuth2 client (`DOMO_CLIENT_ID` / `DOMO_CLIENT_SECRET`). Gives DataSet schemas, CSV export, SQL execute, page/card IDs, users/groups.
+2. **Private API** (`{instance}.domo.com/api/...`) — a **developer access token** (Admin → Security → Access Tokens). Gives card definitions, Beast Mode text, page layout. **Undocumented — confirm shapes on first contact.**
+
+```bash
+export DOMO_CLIENT_ID=...  DOMO_CLIENT_SECRET=...
+export DOMO_INSTANCE=acme           # for {instance}.domo.com
+export DOMO_DEV_TOKEN=...           # private-API access token (optional but needed for full fidelity)
+eval "$(scripts/get-token.sh)"      # sets DOMO_ACCESS_TOKEN (public)
+```
+
+---
+
+## Phase 0 — Confirm access fidelity
+
+Before scoping, determine which extraction tier is available:
+- **Tier A (full):** developer token reaches `/api/content/v1/cards` → auto-extract card defs + Beast Modes. Aim for this.
+- **Tier B (degraded):** public API only → DataSet schemas + CSV + card IDs, but **no** card defs/Beast Modes/layout. Fall back to **PNG-read** of each card (see `feedback_phase1d_dashboard_png`) + manual chart-kind tagging.
+
+Run `ruby scripts/domo-discover.rb --probe` to detect the tier.
+
+---
+
+## Phase 1 — Discover
+
+`ruby scripts/domo-discover.rb --pages <id,...>` →
+- DataSets used by the target pages (schema: column names + types)
+- Card list per page + per-card definition (Tier A) or PNG (Tier B)
+- Beast Mode formulas (Tier A)
+- Page layout (collections + card geometry)
+
+Outputs `discovery/datasets.json`, `discovery/cards.json`, `discovery/pages.json`,
+`discovery/beast-modes.json`.
+
+---
+
+## Phase 2 — Translate Beast Modes
+
+`ruby scripts/convert-beast-modes.rb` → feeds each Beast Mode SQL string through
+`convert_sql_to_sigma_formula`. Apply the normalizations in
+`refs/beast-mode-to-sigma.md` FIRST (strip backticks, `WEEKDAY`→`DAYOFWEEK`,
+flag aggregate `CEILING`/`FLOOR`, reject unsupported `SQRT`/`CONVERT_TZ`).
+Outputs `discovery/formulas.json` (Beast Mode id → Sigma formula).
+
+---
+
+## Phase 3 — Data model
+
+`ruby scripts/build-dm.rb` → one DM element per DataSet (flat table) + calc
+columns from translated Beast Modes. No star schema unless a DataFlow join is in
+scope (out of scope for v1 — DataSets are treated as opaque source tables).
+
+---
+
+## Phase 4 — Post DM
+
+Reuse `post-and-readback.rb`: POST to `/v2/dataModels/spec`, GET back, capture
+server element IDs, verify zero error columns.
+
+---
+
+## Phase 5 — Workbook
+
+`ruby scripts/build-workbook.rb` → map each card to a Sigma element:
+- Domo chart type → Sigma chart kind (table see `refs/beast-mode-to-sigma.md` chart map)
+- axis / series / sort / Top-N binding
+- pivot cards → `rowsBy` + `columnsBy` arrays (see `feedback_sigma_pivot_rowsby_columnsby`)
+- page filters → workbook controls
+
+### Phase 5d — Layout
+Reuse `build-dashboard-layout.rb` + `put-layout.rb`: card geometry → 24-col grid.
+
+---
+
+## Phase 6 — Parity (hard-gated)
+
+Pull ground-truth aggregations from Domo's **public** `POST /v1/datasets/query/execute/{id}`
+(stable) and compare to Sigma `query`. Run `assert-phase6-ran.rb` before declaring
+GREEN. Do NOT rely on the private API for parity data.
+
+---
+
+## Phase 7 — Cleanup
+
+Delete orphan test workbooks (`/v2/files/<id>`, see `feedback_sigma_workbook_delete_endpoint`).
+
+---
+
+## Open questions — resolve on first instance access
+
+See `../research/domo-to-sigma.md` "Open questions". The blockers that most change
+the skill: (1) does the dev token reach `/api/content/v1/cards`? (2) exact card-def
+JSON shape; (3) page-layout geometry units. Until confirmed, treat Phases 1/2/5 as
+unvalidated.
