@@ -131,12 +131,30 @@ Both `research/*.md` files end with an **Open questions** list. The blockers tha
 most change the implementation:
 
 1. Does a developer token reach `/api/content/v1/cards`? (Tier A vs B.)
+   *Partially answered (June 2026):* A customer engagement confirmed the endpoint is
+   real and reachable with a dev token. The `parts=metadata,properties,datasources`
+   form returns the full card definition. Exact field paths for sort/filter/series
+   still need confirming on a live instance (`TODO(on-access)` in discovery scripts).
+   Also confirmed: Beast Mode formula SQL is available via the public API on the
+   DataSet object (`properties.formulas.formulas`) — private token not required for
+   formula extraction, only for per-card column/filter/sort config.
+   Reference implementation: [`domolibrary`](https://github.com/jaewilson07/domo_library)
+   (Jae Wilson / DataCrew) independently confirms these endpoints are in active use.
+
 2. Exact card-definition JSON shape — where chart type, axes, series, sort, and
-   Beast Mode SQL actually live.
+   Beast Mode SQL actually live. **Still open** — endpoint confirmed, field paths not.
+
 3. Page-layout geometry units, for mapping to Sigma's 24-column grid.
+
 4. Exact column schemas of the Governance `Cards` / `Pages` / `Activity Log`
    datasets — and whether a `Beast Modes` Governance dataset exists (if so, Tier A
    becomes reachable on the *public* API and the private dependency drops out).
+
+**Compliance note (June 2026):** The private card API (`/api/content/v1/...`) is
+undocumented. Before a production migration run, confirm with the customer's Domo
+account team that programmatic extraction is acceptable. Same caution as the
+ThoughtSpot private API situation. See `refs/connection.md` for the rate-limit and
+token-refresh guidance.
 
 ---
 

@@ -93,18 +93,49 @@ if opts[:pages]
     page['_layout'] = layout if layout
 
     card_ids = Array(page['cardIds'] || page['cards']) # TODO(on-access): confirm field name
-    card_ids.each do |cid|
-      defn = Domo.card_definition(cid) # nil on Tier B
-      if defn
-        cards_out << defn
-        # TODO(on-access): confirm where Beast Mode SQL lives in the card JSON.
-        # Likely under a "calculatedFields" / "beastModes" array on the datasource.
-        Array(dig_beast_modes(defn)).each { |bm| beast_out << bm }
-      else
+
+    # Tier A: fetch full card definitions via the confirmed private endpoint.
+    # parts=metadata,properties,datasources returns chart type, axes, series,
+    # sort, filter clauses, and datasource/Beast Mode refs in one call.
+    # TODO(on-access): verify exact JSON field paths for sort/filter/series.
+    if Domo.dev_token
+      # Batch urns (comma-separated) to reduce round trips.
+      card_ids.each_slice(20) do |batch|
+        urns = batch.join(',')
+        defns = Domo.private_get(
+          '/api/content/v1/cards',
+          query: { urns: urns, parts: 'metadata,properties,datasources' }
+        )
+        Array(defns).each do |defn|
+          cards_out << defn
+          Array(dig_beast_modes(defn)).each { |bm| beast_out << bm }
+        end
+      end
+    else
+      card_ids.each do |cid|
         cards_out << { 'id' => cid, '_tierB' => true,
                        '_note' => 'no private API — capture PNG + transcribe Beast Modes manually' }
       end
     end
+  end
+
+  # Beast Mode formulas are ALSO on the DataSet object (public API path).
+  # Fetch them here for any dataset not already covered by card definitions.
+  # GET /api/data/v3/datasources/{id}?parts=core,permission,formulas
+  # → response.properties.formulas.formulas = [{id, name, formula (SQL)}]
+  # TODO(on-access): confirm field path on a live instance.
+  if opts[:datasets]
+    datasets = JSON.parse(File.read(File.join(OUT, 'datasets.json'))) rescue []
+    datasets.each do |ds|
+      ds_detail = Domo.private_get(
+        "/api/data/v3/datasources/#{ds['id']}",
+        query: { parts: 'core,permission,formulas' }
+      ) rescue nil
+      next unless ds_detail
+      formulas = ds_detail.dig('properties', 'formulas', 'formulas') || []
+      formulas.each { |f| beast_out << f.merge('_dataSourceId' => ds['id']) }
+    end
+    dump('beast-modes-from-datasets.json', beast_out) unless beast_out.empty?
   end
 
   dump('pages.json', pages_out)

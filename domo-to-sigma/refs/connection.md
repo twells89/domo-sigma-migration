@@ -55,15 +55,64 @@ curl -s -H "X-DOMO-Developer-Token: $DOMO_DEV_TOKEN" \
 (Some instances accept a session cookie + `X-XSRF-Token` instead — token is cleaner
 for automation and is what we standardize on.)
 
+### Confirmed `parts` values for card definition (June 2026)
+
+A customer engagement confirmed that the GET-by-urn variant returns the full card definition. The public docs only document a render endpoint at this path — the structured definition is the `parts` form:
+
+```bash
+GET {instance}.domo.com/api/content/v1/cards?urns={cardId}&parts=metadata,properties,datasources
+```
+
+`parts` is additive — include all three for a migration. The response carries column/field list, filter clauses, sort specs, and Beast Mode formula references.
+- `metadata` — card title, type, owner
+- `properties` — viz config: chart type, axes, series, sort direction, applied filters
+- `datasources` — DataSet binding + any Beast Mode calc references
+
+To enumerate all cards bound to a DataSet before fetching definitions:
+```bash
+GET {instance}.domo.com/api/content/v1/datasources/{datasetId}/cards?drill=true
+```
+
+⚠️ The exact JSON field paths for sort/filter/series are **TODO(on-access)** — the endpoint and `parts` mechanism are confirmed, the field names need verifying on a live instance.
+
+### Filter object shape (inferred from embed SDK — confirm on live instance)
+
+Domo's embed filter docs reveal the filter schema the app uses internally. Stored card filters likely use the same shape:
+```json
+{ "column": "Status", "operator": "IN", "values": ["Active", "Pending"] }
+```
+Operators: `IN`, `NOT_IN`, `EQUALS`, `NOT_EQUALS`, `GREATER_THAN`, `LESS_THAN`, `GREATER_THAN_EQUALS_TO`, `LESS_THAN_EQUALS_TO`, `BETWEEN`, `CONTAINS`. Use this as a Rosetta Stone when parsing filter clauses out of the card definition response.
+
+### Beast Mode formulas — also available on the DataSet object (Tier B path)
+
+Beast Mode formula text is NOT only in the private card API. The DataSet response carries a `properties.formulas.formulas` block with each calc's `id`, `name`, and SQL formula text:
+
+```bash
+GET {instance}.domo.com/api/data/v3/datasources/{datasetId}?parts=core,permission,formulas
+```
+
+This means formula-layer extraction (Beast Mode → Sigma formula translation) can run on the **public** API path — no private token needed for that step. The private card API is needed for which columns/filters/sorts a specific card applies, not the formula definitions themselves.
+
+### Third-party reference implementation
+
+[`domolibrary`](https://github.com/jaewilson07/domo_library) (Jae Wilson / DataCrew) is an open-source Python SDK built specifically around these private endpoints — independent confirmation they're real and in active use. Its architecture separates raw "route functions" (one per API call) from higher-level class functions, so when Domo bumps an endpoint version you swap one route. Worth adopting the same pattern in `domo_rest.rb`.
+
 ### Endpoints (best-effort — CONFIRM shapes on first contact)
 | Call | Use |
 |---|---|
-| `GET /api/content/v1/cards?urns={ids}&parts=metadata,datasources,problems,...` | **card definitions** ⭐ |
-| `GET /api/content/v1/cards/kpi/definition/{cardId}` | full KPI/chart def incl. Beast Mode SQL |
+| `GET /api/content/v1/cards?urns={ids}&parts=metadata,properties,datasources` | **card definitions** ⭐ (confirmed endpoint + parts) |
+| `GET /api/content/v1/datasources/{datasetId}/cards?drill=true` | enumerate cards per DataSet |
+| `GET /api/content/v1/cards/kpi/definition/{cardId}` | full KPI/chart def incl. Beast Mode SQL (alt form) |
 | `GET /api/content/v1/pages/{pageId}` | page layout — collections + card geometry |
-| `GET /api/content/v1/datasources/{datasetId}/cards` | cards using a DataSet |
+| `GET /api/data/v3/datasources/{datasetId}?parts=core,permission,formulas` | DataSet metadata + **Beast Mode SQL** via `properties.formulas` |
 | `GET /api/data/v3/datasources/{datasetId}?parts=core,permission` | DataSet metadata + PDP |
 | `GET /api/dataprocessing/v1/dataflows/{id}` | DataFlow graph (only if pipeline migration in scope) |
+
+### Compliance note
+
+Paths 1 and 3 (private API + render) use Domo's undocumented surface. Before a production run, confirm with the customer's Domo account team that programmatic extraction for migration is acceptable — both to avoid surprise breaking changes and for contractual cleanliness. Flag this in Phase 0 of SKILL.md.
+
+The session-token / developer-token auth has tighter rate limits and shorter token life than the public OAuth token. Build in token refresh + exponential backoff when looping over large card populations.
 
 ### Degradation when private API is unavailable (Tier B)
 If the customer won't issue a dev token, fall back to:
