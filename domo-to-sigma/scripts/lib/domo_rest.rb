@@ -130,6 +130,23 @@ module Domo
     handle(http(uri).request(req), 'application/json')
   end
 
+  # PUT against the private API. Returns the raw Net::HTTPResponse so callers can
+  # branch on Content-Type (the render endpoint returns JSON-wrapped base64 OR raw
+  # image bytes depending on instance version). Returns nil on Tier B.
+  def private_put_raw(path, body:, query: nil)
+    tok = dev_token or return nil
+    uri = URI("https://#{instance}.domo.com#{path}")
+    uri.query = URI.encode_www_form(query) if query
+    req = Net::HTTP::Put.new(uri)
+    req['X-DOMO-Developer-Token'] = tok
+    req['Content-Type'] = 'application/json'
+    req['Accept']       = 'application/json'
+    req.body = body.is_a?(String) ? body : JSON.generate(body)
+    res = http(uri).request(req)
+    raise Error, "#{res.code} #{res.message} for #{path}: #{res.body}" unless res.is_a?(Net::HTTPSuccess)
+    res
+  end
+
   # TODO(on-access): confirm the `parts` values and the response JSON shape.
   def card_definition(card_id, parts: 'metadata,datasources,problems')
     private_get('/api/content/v1/cards', query: { urns: card_id, parts: parts })
@@ -139,11 +156,64 @@ module Domo
     private_get("/api/content/v1/pages/#{page_id}")
   end
 
+  # ---- Card render (visual capture) ----------------------------------------
+  # Renders a card exactly as the Domo app shows it. This is the automated
+  # upgrade of the Tier-B "manual PNG capture" fallback: with a dev token we pull
+  # a true visual reference per card so the Sigma build + layout-visual-qa gate
+  # have something to match (see refs/connection.md "Visual + layout capture"
+  # and feedback_phase1d_dashboard_png / batch_converter_png_brief).
+  #
+  # PUT /api/content/v1/cards/kpi/{cardId}/render?parts=image      → PNG
+  #                                              ?parts=imagePDF   → PDF
+  # Body params (all optional): width, height, scale, queryOverrides, filters.
+  # Returns binary image/PDF bytes, or nil on Tier B.
+  #
+  # TODO(on-access): confirm the response form. Community sources report a
+  # JSON body carrying base64 under an "image"/"imageData" field; some instances
+  # return raw image bytes. We handle BOTH; verify the field name on first run.
+  def render_card(card_id, format: :png, width: 1000, height: 700, scale: 2,
+                  query_overrides: nil, filters: nil)
+    part = (format.to_sym == :pdf) ? 'imagePDF' : 'image'
+    body = { width: width, height: height, scale: scale }
+    body[:queryOverrides] = query_overrides if query_overrides
+    body[:filters]        = filters if filters
+    res = private_put_raw("/api/content/v1/cards/kpi/#{card_id}/render",
+                          body: body, query: { parts: part })
+    return nil if res.nil?
+    decode_render(res)
+  end
+
+  def render_card_png(card_id, **kw); render_card(card_id, format: :png, **kw); end
+  def render_card_pdf(card_id, **kw); render_card(card_id, format: :pdf, **kw); end
+
   def dataset_meta(ds_id)
     private_get("/api/data/v3/datasources/#{ds_id}", query: { parts: 'core,permission' })
   end
 
   # ---- internals -----------------------------------------------------------
+
+  # Normalize a render response to raw binary bytes, tolerating both forms:
+  #   1. raw bytes      — Content-Type image/* or application/pdf
+  #   2. JSON + base64  — { "image": "<b64>" } / "imageData" / "data" / bare b64
+  # TODO(on-access): once the real shape is known, drop the branch we don't hit.
+  def decode_render(res)
+    require 'base64'
+    ctype = res['content-type'].to_s
+    body  = res.body.to_s
+    return body if ctype.start_with?('image/', 'application/pdf', 'application/octet-stream')
+
+    if ctype.include?('json') || body.lstrip.start_with?('{')
+      json = JSON.parse(body) rescue nil
+      if json.is_a?(Hash)
+        b64 = json['image'] || json['imageData'] || json['data'] ||
+              json.dig('image', 'data')
+        return Base64.decode64(b64) if b64.is_a?(String) && !b64.empty?
+      end
+    end
+    # Fall back: treat the whole body as a base64 string (some instances do this).
+    looks_b64 = body.match?(%r{\A[A-Za-z0-9+/=\s]+\z}) && body.length > 100
+    looks_b64 ? Base64.decode64(body) : body
+  end
 
   def http(uri)
     h = Net::HTTP.new(uri.host, uri.port)

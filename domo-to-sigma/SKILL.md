@@ -44,6 +44,7 @@ Domo) and *layout/binding* (cards → Sigma elements on a 24-col grid).
 | `scripts/get-token.sh` | prereq | OAuth2 client-credentials → public-API bearer token |
 | `scripts/lib/domo_rest.rb` | prereq | Domo REST wrapper (public + private), auto token refresh |
 | `scripts/domo-discover.rb` | 1 | Enumerate DataSets, pages, cards; pull schemas + (private) card defs + Beast Modes |
+| `scripts/domo-capture-visuals.rb` | 1b | Render per-card PNG + full-page PDF, normalize card geometry → layout JSON (design-fidelity reference) |
 | `scripts/convert-beast-modes.rb` | 2 | Beast Mode SQL → Sigma formula via `convert_sql_to_sigma_formula` |
 | `scripts/build-dm.rb` | 3 | DataSet schema + calc columns → Sigma DM spec |
 | `post-and-readback.rb` *(reuse from tableau-to-sigma)* | 4 | POST DM/WB + capture server element IDs |
@@ -104,6 +105,25 @@ Outputs `discovery/datasets.json`, `discovery/cards.json`, `discovery/pages.json
 
 ---
 
+## Phase 1b — Capture visuals + layout (design fidelity)
+
+**This is the step that prevents generically-templated output.** Rebuilding from
+DataSets + chart-type strings alone is why early Domo migrations "didn't look
+good." Capture a true visual + real geometry so the build has something to match:
+
+`ruby scripts/domo-capture-visuals.rb --pages <id,...>` →
+- `discovery/layout/<pageId>.json` — card positions/sizes on Domo's grid (so the
+  hero viz keeps its weight instead of collapsing to an equal-weight grid)
+- `discovery/png/cards/<cardId>.png` — per-card visual reference
+- `discovery/png/pages/<pageId>.pdf` — full-page source image for the QA gate
+
+Tier A (dev token) does this automatically via the card render endpoint. **Tier B:
+export the same PNGs/PDF from the Domo UI into those same paths** — the build and
+QA steps consume them identically (see `refs/connection.md` "Visual + layout
+capture"). Either way, **READ these images** before and during Phase 5.
+
+---
+
 ## Phase 2 — Translate Beast Modes
 
 `ruby scripts/convert-beast-modes.rb` → feeds each Beast Mode SQL string through
@@ -131,14 +151,25 @@ server element IDs, verify zero error columns.
 
 ## Phase 5 — Workbook
 
-`ruby scripts/build-workbook.rb` → map each card to a Sigma element:
+`ruby scripts/build-workbook.rb` → map each card to a Sigma element. **Read the
+per-card PNG from `discovery/png/cards/` while mapping** — the image disambiguates
+chart kind and formatting that the chartType string alone misses:
 - Domo chart type → Sigma chart kind (table see `refs/beast-mode-to-sigma.md` chart map)
 - axis / series / sort / Top-N binding
 - pivot cards → `rowsBy` + `columnsBy` arrays (see `feedback_sigma_pivot_rowsby_columnsby`)
 - page filters → workbook controls
 
 ### Phase 5d — Layout
-Reuse `build-dashboard-layout.rb` + `put-layout.rb`: card geometry → 24-col grid.
+Reuse `build-dashboard-layout.rb` + `put-layout.rb`: feed `discovery/layout/<pageId>.json`
+(card geometry from Phase 1b) → 24-col grid, preserving relative position and the
+hero viz's weight.
+
+### Phase 5e — Layout visual QA (MANDATORY gate)
+Run the shared **layout-visual-qa** loop (`shared/refs/layout-visual-qa.md`):
+render the full Sigma page to PNG and compare it **side-by-side against the Domo
+full-page PDF** (`discovery/png/pages/<pageId>.pdf`) plus the per-card PNGs. Check
+the source-fidelity → structural → design-quality rubrics, fix the spec, re-render,
+and loop until the render passes. Declare done on a *clean render*, never on HTTP 200.
 
 ---
 

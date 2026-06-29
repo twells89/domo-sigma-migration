@@ -104,9 +104,44 @@ This means formula-layer extraction (Beast Mode → Sigma formula translation) c
 | `GET /api/content/v1/datasources/{datasetId}/cards?drill=true` | enumerate cards per DataSet |
 | `GET /api/content/v1/cards/kpi/definition/{cardId}` | full KPI/chart def incl. Beast Mode SQL (alt form) |
 | `GET /api/content/v1/pages/{pageId}` | page layout — collections + card geometry |
+| `PUT /api/content/v1/cards/kpi/{cardId}/render?parts=image` | **render card → PNG** ⭐ (visual reference) |
+| `PUT /api/content/v1/cards/kpi/{cardId}/render?parts=imagePDF` | render card → PDF |
 | `GET /api/data/v3/datasources/{datasetId}?parts=core,permission,formulas` | DataSet metadata + **Beast Mode SQL** via `properties.formulas` |
 | `GET /api/data/v3/datasources/{datasetId}?parts=core,permission` | DataSet metadata + PDP |
 | `GET /api/dataprocessing/v1/dataflows/{id}` | DataFlow graph (only if pipeline migration in scope) |
+
+### Visual + layout capture (the design-fidelity lever)
+
+A migration that rebuilds dashboards from DataSets + chart-type strings alone
+produces generically-templated output (the recurring *"design is still a big
+issue"* feedback). Two private-API captures close that gap, mirroring the proven
+Tableau flow (read the source image before writing the spec, and feed it to the
+mandatory layout-visual-qa gate — see `shared/refs/layout-visual-qa.md`,
+`feedback_phase1d_dashboard_png`, `batch_converter_png_brief`):
+
+1. **Layout geometry** — `GET /api/content/v1/pages/{pageId}` carries each card's
+   position/size on Domo's page grid. Normalize it so `build-dashboard-layout.rb`
+   places elements faithfully (hero viz keeps its weight) instead of auto-stacking
+   into an equal-weight "spreadsheet of cards."
+2. **Card render** — `PUT /api/content/v1/cards/kpi/{cardId}/render` returns the
+   card exactly as the app shows it. Body params (all optional):
+   ```json
+   { "width": 1000, "height": 700, "scale": 2,
+     "queryOverrides": { }, "filters": [ ] }
+   ```
+   `parts=image` → PNG, `parts=imagePDF` → PDF. Community sources report the
+   response is a JSON body with base64 under an `image`/`imageData` field; some
+   instances return raw image bytes. `lib/domo_rest.rb#decode_render` handles
+   **both** — confirm the exact field on first contact and prune the unused branch.
+
+`scripts/domo-capture-visuals.rb --pages <ids>` runs both: writes
+`discovery/layout/<pageId>.json`, a per-card `discovery/png/cards/<cardId>.png`,
+and a full-page `discovery/png/pages/<pageId>.pdf` (the source-fidelity reference
+the QA gate compares the Sigma render against).
+
+⚠️ This is a **Tier A** capability (needs the dev token). It is the *automated
+upgrade* of the manual-PNG fallback below — when a dev token exists, you no longer
+hand-export cards from the UI.
 
 ### Compliance note
 
@@ -117,9 +152,12 @@ The session-token / developer-token auth has tighter rate limits and shorter tok
 ### Degradation when private API is unavailable (Tier B)
 If the customer won't issue a dev token, fall back to:
 - Public API for DataSet schema + CSV + page/card IDs.
-- **Manual PNG capture** of each card (export from UI) → read the image to infer
-  chart kind, axes, and any visible Beast Mode results (see
-  `feedback_phase1d_dashboard_png`).
+- **Manual PNG capture** of each card (export from UI) into
+  `discovery/png/cards/<cardId>.png` + a full-page UI "Export to PDF" into
+  `discovery/png/pages/` → read the images to infer chart kind, axes, layout,
+  and any visible Beast Mode results (see `feedback_phase1d_dashboard_png`).
+  This is the same destination `domo-capture-visuals.rb` writes on Tier A, so the
+  build + QA steps consume it identically — only the *capture* is manual.
 - Beast Mode text must then be supplied by the customer or transcribed from the UI.
 
 ---
