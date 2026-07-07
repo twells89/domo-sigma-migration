@@ -40,7 +40,7 @@ Apply these to the raw Beast Mode string first:
 | `POWER(Values,2)` | per-row power | per-row power, but **sums per series** if multi-series | `Power([Values],2)` (handle series via grouping) |
 | `WEEKDAY(d)` | MySQL WEEKDAY (0=Mon) | replaced with `DAYOFWEEK` (1=Sun) | `Weekday([d])` — mind the 1=Sunday base |
 | `SQRT(x)` | square root | **unsupported** in Beast Mode | use `Power([x], 0.5)` if it appears |
-| Summary Number Beast Mode | a column | must be aggregated to be a summary | maps to a Sigma KPI element |
+| Summary Number Beast Mode | a column | must be aggregated to be a summary | maps to a Sigma **KPI** element — see `refs/card-to-element.md` Rule 0 (KPI, never a table) |
 
 ---
 
