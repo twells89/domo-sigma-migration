@@ -23,6 +23,7 @@ user-invocable: true
 - `../research/domo-to-sigma.md` — object model, API surface, scope, open questions
 - `refs/connection.md` — Domo auth (OAuth public API + developer access token for private API)
 - `refs/beast-mode-to-sigma.md` — Beast Mode (MySQL SQL) → Sigma formula mapping
+- `refs/card-to-element.md` — **Domo card → Sigma element map. Read before Phase 5.** Rule 0 (Summary Number → KPI, never a table) is the #1 fidelity fix; also covers filtering + no-liberties discipline.
 - The `tableau-to-sigma` skill's `refs/workbook-layout.md` and `refs/data-model-spec.md` — reused wholesale
 
 ---
@@ -151,13 +152,28 @@ server element IDs, verify zero error columns.
 
 ## Phase 5 — Workbook
 
-`ruby scripts/build-workbook.rb` → map each card to a Sigma element. **Read the
-per-card PNG from `discovery/png/cards/` while mapping** — the image disambiguates
-chart kind and formatting that the chartType string alone misses:
-- Domo chart type → Sigma chart kind (table see `refs/beast-mode-to-sigma.md` chart map)
+`ruby scripts/build-workbook.rb` → map each card to a Sigma element, following
+**`refs/card-to-element.md`** (the chart map). **Read the per-card PNG from
+`discovery/png/cards/` while mapping** — the image disambiguates chart kind and
+formatting that the chartType string alone misses.
+
+**For EVERY card, decide the element kind FIRST (Rule 0 in the ref):**
+> Does the Domo tile show a single big **Summary Number**? → emit a `kpi-chart`,
+> **never a table.** This is the failure mode that shipped: Domo lets any card
+> (including a table) display as a summary number, and porting it as a Sigma
+> table produces an ugly grid where a big number was expected. When torn between
+> KPI and a 1-row table, choose KPI. Missing sparkline support is NOT a reason to
+> fall back to a table — emit the KPI and warn that the trend must be bound in
+> the UI (`sigma-kpi-trend-comparison-ui-only`).
+
+Then translate the rest per the ref:
+- Domo chart type → Sigma chart kind (full table in `refs/card-to-element.md`)
 - axis / series / sort / Top-N binding
 - pivot cards → `rowsBy` + `columnsBy` arrays (see `feedback_sigma_pivot_rowsby_columnsby`)
-- page filters → workbook controls
+- page filters → workbook controls; card-level filter clauses → element filters
+  (port **both** levels — see the ref's Filtering fidelity section)
+- **No liberties:** one card → one element; reproduce labels/formats/layout; every
+  unsupported/dropped item → a Phase-5e warning, never a silent substitution
 
 ### Phase 5d — Layout
 Reuse `build-dashboard-layout.rb` + `put-layout.rb`: feed `discovery/layout/<pageId>.json`
@@ -170,6 +186,14 @@ render the full Sigma page to PNG and compare it **side-by-side against the Domo
 full-page PDF** (`discovery/png/pages/<pageId>.pdf`) plus the per-card PNGs. Check
 the source-fidelity → structural → design-quality rubrics, fix the spec, re-render,
 and loop until the render passes. Declare done on a *clean render*, never on HTTP 200.
+
+Plus the Domo-specific gate from `refs/card-to-element.md`:
+- **Every Domo summary-number tile → a Sigma `kpi-chart`.** Count summary tiles
+  in the source PDF vs `kpi-chart` elements in the spec — they must match. Zero
+  KPIs when the source has summary tiles is an automatic **fail**.
+- No Sigma table stands where the Domo tile showed a single number.
+- Filter-inventory diff is clean (every page filter → control, every card filter
+  → element filter).
 
 ---
 

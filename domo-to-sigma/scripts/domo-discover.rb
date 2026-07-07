@@ -107,6 +107,11 @@ if opts[:pages]
           query: { urns: urns, parts: 'metadata,properties,datasources' }
         )
         Array(defns).each do |defn|
+          # Annotate each card with a normalized Summary-Number hint so the build
+          # step (Phase 5) can decide KPI-vs-table without re-deriving. Domo shows
+          # a Summary Number on EVERY viz card — see refs/card-to-element.md Rule 0.
+          sn = summary_number(defn)
+          defn['_summaryNumber'] = sn if sn
           cards_out << defn
           Array(dig_beast_modes(defn)).each { |bm| beast_out << bm }
         end
@@ -150,5 +155,29 @@ BEGIN {
     # Placeholder: walk the card def for calculated-field nodes carrying SQL text.
     # Expected output: [{ "cardId"=>, "name"=>, "sql"=>, "dataSourceId"=> }, ...]
     []
+  end
+
+  # Extract the card's Summary-Number config — the single big value Domo shows at
+  # the top of the tile (column + aggregation + label + number format). This is
+  # what a table-that-looks-like-a-KPI is built from; the build step maps it to a
+  # Sigma kpi-chart (refs/card-to-element.md Rule 0), NOT a table.
+  #
+  # TODO(on-access): confirm the real field path. Community + the Analyzer UI put
+  # the summary number under the card's properties/overrides; likely keys seen:
+  # 'summaryNumber', 'overrides.summaryNumber', properties.* with an aggregation.
+  # Normalize to a stable shape; leave nil when the card genuinely has none.
+  def summary_number(card_def)
+    props = card_def['properties'] || card_def.dig('metadata', 'properties') || {}
+    sn = card_def['summaryNumber'] ||
+         props['summaryNumber'] ||
+         props.dig('overrides', 'summaryNumber')
+    return nil unless sn.is_a?(Hash)
+    {
+      'column'      => sn['column'] || sn['dataColumn'] || sn['field'],
+      'aggregation' => sn['aggregation'] || sn['aggr'] || sn['func'],
+      'label'       => sn['label'] || sn['title'],
+      'format'      => sn['format'] || sn['numberFormat'],
+      '_raw'        => sn
+    }
   end
 }
