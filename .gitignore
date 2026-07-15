@@ -7,6 +7,10 @@ discovery/
 # Secrets
 .env
 *.token
+auth.json            # live Sigma bearer token written by scripts/get_token.py
+
+# Environment doctor fingerprint (machine-local; regenerated per run)
+doctor.json
 
 # OS / editor
 .DS_Store

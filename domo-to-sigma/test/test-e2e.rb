@@ -17,7 +17,11 @@ $failures = 0
 def ok(c, m) if c then puts "  ok: #{m}" else $failures += 1; puts "  FAIL: #{m}" end end
 
 Dir.mktmpdir('domo-e2e') do |dir|
-  env = { 'DOMO_DISCOVERY_DIR' => dir }
+  # build-dm.rb enforces the Step-0 environment gate; this e2e test exercises
+  # build LOGIC, not the environment, so waive it explicitly — keeps the suite
+  # hermetic on a machine (e.g. CI) that never ran the doctor.
+  env = { 'DOMO_DISCOVERY_DIR' => dir,
+          'SIGMA_SKIP_DOCTOR_GATE' => 'e2e: environment not under test' }
   w = ->(name, obj) { File.write(File.join(dir, name), JSON.generate(obj)) }
   run = ->(script, *args) { system(env, 'ruby', File.join(SCRIPTS, script), *args, out: File::NULL, err: File::NULL) }
 
