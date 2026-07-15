@@ -46,7 +46,11 @@ Domo) and *layout/binding* (cards → Sigma elements on a 24-col grid).
 
 | Script | Phase | Purpose |
 |---|---|---|
-| `scripts/get-token.sh` | prereq | OAuth2 client-credentials → public-API bearer token |
+| `scripts/doctor.sh` / `scripts/doctor.ps1` *(vendored)* | 0 | Environment preflight → `doctor.json` (macOS/Linux/Git-Bash / Windows PowerShell) |
+| `scripts/assert-doctor-ran.rb` *(vendored)* | 0 | Gate: the build phases refuse to start until `doctor.json` passes |
+| `scripts/setup.rb` *(vendored)* | prereq | Store Sigma credentials once (any shell) |
+| `scripts/get_token.py` *(vendored)* | prereq | Shell-neutral Sigma token → `auth.json` (bash / PowerShell / cmd) |
+| `scripts/get-token.sh` | prereq | OAuth2 client-credentials → Domo public-API bearer token |
 | `scripts/lib/domo_rest.rb` | prereq | Domo REST wrapper (public + private), auto token refresh |
 | `scripts/domo-discover.rb` | 1 | Enumerate DataSets, pages, cards; pull schemas + (private) card defs + Beast Modes |
 | `scripts/domo-capture-visuals.rb` | 1b | Render per-card PNG + full-page PDF, normalize card geometry → layout JSON (design-fidelity reference) |
@@ -76,13 +80,46 @@ Domo) and *layout/binding* (cards → Sigma elements on a 24-col grid).
 
 ---
 
+## Step 0 — Environment doctor (MANDATORY — the build phases gate on it)
+
+Run the environment doctor FIRST. It reports missing runtimes (ruby / python /
+node / bash) with per-OS fixes — flagging the known Windows footguns (the Python
+"Store stub", a missing bash, `core.autocrlf` mangling shebangs) — **and** writes
+a machine-readable `doctor.json` fingerprint to `~/.sigma-migration/doctor.json`.
+`build-dm.rb` (Phase 3, the first build step) refuses to start until a **passing**
+`doctor.json` exists, so a broken environment stops here with an explicit fix
+instead of the run improvising around a missing runtime (the #1 cause of
+cross-user / cross-OS drift).
+
+macOS / Linux / Git-Bash:
+```bash
+bash scripts/doctor.sh
+```
+
+Windows PowerShell:
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\doctor.ps1
+```
+
+If the doctor cannot pass in your environment and you must proceed anyway, waive
+the gate explicitly and name the reason in your report:
+`SIGMA_SKIP_DOCTOR_GATE="<reason>" ruby scripts/build-dm.rb`.
+
+---
+
 ## Prerequisites
 
 ### Sigma credentials
+Sigma is the migration *target*, so a Sigma token is needed to POST the DM /
+workbook. Mint it in a **shell-neutral** way (works in bash, PowerShell, and cmd):
 ```bash
-ruby ../tableau-to-sigma/scripts/setup.rb   # one-time
-eval "$(../tableau-to-sigma/scripts/get-token.sh)"
+ruby scripts/setup.rb                     # one-time — stores Sigma creds (any shell)
+python scripts/get_token.py --workdir .   # → ./auth.json (a live token; .gitignored)
 ```
+The Ruby build scripts read `auth.json` from the current directory (or
+`$SIGMA_WORKDIR`) automatically, so run them from this skill dir. An explicit
+`SIGMA_API_TOKEN` in the environment always wins. On bash you can still use the
+env-var idiom if you prefer: `eval "$(python scripts/get_token.py --print-export)"`.
 
 ### Domo access — see `refs/connection.md`
 Two surfaces, both usually needed:

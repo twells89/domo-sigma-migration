@@ -76,6 +76,21 @@ def build_element(ds, map_entry, projection_bms)
 end
 
 if $PROGRAM_NAME == __FILE__
+  # 🚧 Environment gate (Windows / cross-user parity). Phase 3 is the first BUILD
+  # step, so it refuses to start until the Step-0 doctor (scripts/doctor.sh on
+  # macOS/Linux/Git-Bash, scripts/doctor.ps1 on Windows PowerShell) has written a
+  # PASSING doctor.json — the same gate the other migration skills enforce, so a
+  # broken environment stops here with an explicit fix instead of the run
+  # improvising around a missing runtime. Waive by naming a reason:
+  #   SIGMA_SKIP_DOCTOR_GATE="<reason>" ruby scripts/build-dm.rb
+  gate = File.join(__dir__, 'assert-doctor-ran.rb')
+  if File.exist?(gate)
+    gate_cmd = ['ruby', gate]
+    skip = ENV['SIGMA_SKIP_DOCTOR_GATE'].to_s.strip
+    gate_cmd += ['--skip-doctor-gate', skip] unless skip.empty?
+    abort '  build-dm.rb aborted at the environment gate (see the fix above).' unless system(*gate_cmd)
+  end
+
   datasets = JSON.parse(File.read(File.join(OUT, 'datasets.json'))) rescue []
   cards    = JSON.parse(File.read(File.join(OUT, 'cards.json')))    rescue []
   formulas = JSON.parse(File.read(File.join(OUT, 'formulas.json'))) rescue []
