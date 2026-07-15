@@ -5,12 +5,15 @@ Two [Claude Code](https://claude.com/claude-code) skills for migrating
 modeled on the existing `tableau-to-sigma` / `powerbi-to-sigma` converter and
 assessment skills.
 
-> **Status: research + scaffold. Not yet validated against a live Domo instance.**
-> The authentication path and the *documented public-API* parts are ready to wire;
-> the *private-API* parts (card definitions, Beast Mode text, page layout) are
-> reconstructed from public sources and marked with `TODO(on-access)` to confirm
-> on first contact with a real instance. Everything here is designed so that once
-> a Domo API client + instance are available, the scripts plug straight in.
+> **Status: deterministic build pipeline built + tested offline; final live
+> field-path check pending.** The converter now has runnable Phase 1–5 build
+> scripts (discovery, Beast Mode translation, data-model + workbook builders, a
+> Phase-5e QA gate) with unit + end-to-end tests (`bash domo-to-sigma/test/run-all.sh`).
+> The private-API card-definition shapes are confirmed against Domo's OpenAPI +
+> three production reference implementations; a final field-path check on first
+> contact with a live instance is still recommended (a few paths carry a
+> `TODO(on-access)` note). The Sigma-side reuse scripts are vendored in, so the
+> repo is self-contained.
 
 ---
 
@@ -58,23 +61,29 @@ reference docs. Start with the two `research/*.md` files for the "why," then the
 Recreates a Domo dashboard in Sigma end-to-end:
 
 ```
-Phase 0  Confirm access fidelity (Tier A vs B)
-Phase 1  Discover  — DataSets, pages, cards, Beast Modes
-Phase 2  Translate — Beast Mode SQL → Sigma formulas (convert_sql_to_sigma_formula)
-Phase 3  Data model — one DM element per DataSet + calc columns
-Phase 4  Post DM    — POST /v2/dataModels/spec, capture element IDs
-Phase 5  Workbook   — cards → Sigma chart/table/KPI elements (+ 24-col layout)
-Phase 6  Parity     — Domo query/execute vs Sigma query (hard-gated)
-Phase 7  Cleanup
+Phase 0   Confirm access fidelity (Tier A vs B)
+Phase 1   Discover  — DataSets, pages, cards, Beast Modes (two card-def shapes auto-detected)
+Phase 1b  Capture   — per-card PNG + page PDF + card geometry (design fidelity)
+Phase 2   Translate — Beast Mode SQL → Sigma formulas (normalize + classify + lint around convert_sql_to_sigma_formula)
+Phase 3   Data model — one DM element per DataSet + projection calc columns (clean display names)
+Phase 4   Post DM    — POST /v2/dataModels/spec, capture element IDs / column labels
+Phase 5   Workbook   — cards → Sigma chart/table/KPI elements + controls; assemble master + pages
+Phase 5d  Layout     — Domo card geometry → 24-col grid
+Phase 5e  QA gate    — Domo-specific spec checks (KPI-not-count-of-id, filter fan-out, no bar-as-table, wrap, gridlines-off)
+Phase 6   Parity     — Domo query/execute vs Sigma query (hard-gated)
+Phase 7   Cleanup
 ```
 
 **Key files**
 - [`SKILL.md`](domo-to-sigma/SKILL.md) — phased workflow + script table
-- [`refs/connection.md`](domo-to-sigma/refs/connection.md) — auth for both API surfaces
+- [`refs/connection.md`](domo-to-sigma/refs/connection.md) — auth + the two card-definition shapes
+- [`refs/card-to-element.md`](domo-to-sigma/refs/card-to-element.md) — Domo card → Sigma element map (KPI/filter/bar/wrap/axis rules)
 - [`refs/beast-mode-to-sigma.md`](domo-to-sigma/refs/beast-mode-to-sigma.md) — complete Beast Mode → Sigma formula map
-- [`scripts/get-token.sh`](domo-to-sigma/scripts/get-token.sh) — OAuth2 client-credentials → bearer token
 - [`scripts/lib/domo_rest.rb`](domo-to-sigma/scripts/lib/domo_rest.rb) — REST wrapper (public + private), auto token refresh
-- [`scripts/domo-discover.rb`](domo-to-sigma/scripts/domo-discover.rb) — Phase 1 discovery (public paths runnable; private paths stubbed)
+- [`scripts/domo-discover.rb`](domo-to-sigma/scripts/domo-discover.rb) — Phase 1 discovery (two-shape card-def parser + Beast Mode extraction/classification)
+- `scripts/convert-beast-modes.rb` · `build-dm.rb` · `build-workbook.rb` · `qa-check.rb` · `build-domo-layout.rb` — the Phase 2–5e build pipeline
+- Vendored from `tableau-to-sigma` (clone-safe, provenance-headed): `post-and-readback.rb`, `build-workbook-spec.rb`, `build-dashboard-layout.rb`, `put-layout.rb`, `verify-parity.rb`, `assert-phase6-ran.rb` + lib closure
+- [`test/`](domo-to-sigma/test/) — offline unit + end-to-end suites (`bash domo-to-sigma/test/run-all.sh`)
 
 ---
 
@@ -131,20 +140,24 @@ Both `research/*.md` files end with an **Open questions** list. The blockers tha
 most change the implementation:
 
 1. Does a developer token reach `/api/content/v1/cards`? (Tier A vs B.)
-   *Partially answered (June 2026):* A customer engagement confirmed the endpoint is
-   real and reachable with a dev token. The `parts=metadata,properties,datasources`
-   form returns the full card definition. Exact field paths for sort/filter/series
-   still need confirming on a live instance (`TODO(on-access)` in discovery scripts).
-   Also confirmed: Beast Mode formula SQL is available via the public API on the
-   DataSet object (`properties.formulas.formulas`) — private token not required for
-   formula extraction, only for per-card column/filter/sort config.
-   Reference implementation: [`domolibrary`](https://github.com/jaewilson07/domo_library)
-   (Jae Wilson / DataCrew) independently confirms these endpoints are in active use.
+   *Confirmed:* a customer engagement reached the endpoint with a dev token. Beast
+   Mode formula SQL is also available on the public-API DataSet object
+   (`properties.formulas.formulas`, a map keyed by id) — a private token is needed
+   only for per-card column/filter/sort config. Live reference implementations:
+   [`jsade/domo-query-cli`](https://github.com/jsade/domo-query-cli) (TS, generated
+   from Domo's OpenAPI), [`brycewc/domo-toolkit`](https://github.com/brycewc/domo-toolkit)
+   (JS), [`newli5737/domo-chousa`](https://github.com/newli5737/domo-chousa) (Python).
 
-2. Exact card-definition JSON shape — where chart type, axes, series, sort, and
-   Beast Mode SQL actually live. **Still open** — endpoint confirmed, field paths not.
+2. Exact card-definition JSON shape. *Largely answered:* Domo returns **two** shapes
+   and `domo-discover.rb` auto-detects/normalizes both — Shape A (official
+   `CardDefinition`: `chartBody`/`summaryNumber` Components, `chartType`,
+   `calculatedFields`, `conditionalFormats`) and Shape B (internal analyzer def,
+   `PUT /api/content/v3/cards/kpi/definition` → `definition.subscriptions.main.*`).
+   A final field-path check on a live instance is still recommended.
 
-3. Page-layout geometry units, for mapping to Sigma's 24-column grid.
+3. Page-layout geometry units, for mapping to Sigma's 24-column grid. *Mitigated:*
+   `build-domo-layout.rb` normalizes geometry **relative** to each page's max extent,
+   so it works whether Domo reports cells or pixels.
 
 4. Exact column schemas of the Governance `Cards` / `Pages` / `Activity Log`
    datasets — and whether a `Beast Modes` Governance dataset exists (if so, Tier A
@@ -163,6 +176,7 @@ token-refresh guidance.
 These mirror the conventions of `tableau-to-sigma` / `tableau-assessment` and
 `powerbi-to-sigma` / `powerbi-assessment`: same phased structure, same
 `value/(1+cost)` shortlist math, same output contract, and reuse of the shared
-layout/parity helpers. Effort estimate: converter ~3–4 weeks MVP, assessment
-~1.5–2 weeks — both *smaller* than the Power BI equivalents because Beast Mode's
-SQL nature removes the hardest part (formula translation).
+layout/parity helpers (vendored in). The converter build pipeline is now
+implemented and tested offline; the assessment skill remains a scaffold
+(~1.5–2 weeks). Both are *smaller* than the Power BI equivalents because Beast
+Mode's SQL nature removes the hardest part (formula translation).
