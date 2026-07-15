@@ -11,6 +11,55 @@ Source of truth: Domo "Beast Mode Functions Reference Guide" (captured 2026-06-0
 
 ---
 
+## Translation is delegated — this ref is the Domo-specific wrapper
+
+The actual SQL→Sigma translation runs through the
+`mcp__sigma-data-model__convert_sql_to_sigma_formula` MCP tool — it is the
+**single source of truth** and already handles `CASE WHEN`, `IN` lists,
+`DATEDIFF`, arithmetic, and `snake_case` → `[Title Case]` column references.
+Don't re-implement those. This ref is the **Domo-specific PRE-normalization +
+POST-lint** layer that `scripts/convert-beast-modes.rb` implements around that
+call.
+
+⚠️ The **`CEILING`/`FLOOR`-are-aggregates** trap (below) must be applied as a
+**POST override** — the generic converter treats `CEILING`/`FLOOR` as math
+rounding, so you have to rewrite its output to `Round(Max(...))` / `Round(Min(...))`
+after the fact.
+
+---
+
+## Projection vs aggregate (query structure)
+
+"**Projection**" is a Domo **query-structure** term, not a function class — it's
+where a non-aggregated, row-level expression lands in the query. Classify each
+Beast Mode by *where it lives*, which decides where it goes in Sigma:
+
+| Domo query structure | What it is | Sigma target |
+|---|---|---|
+| **Projection** (row-level, non-aggregated) | lands in the query's `projection` list | a Sigma **data-model calc column** |
+| **Aggregate** (top-level `SUM`/`COUNT`/`AVG`/…) | wraps the whole expression | a Sigma **workbook / element aggregate** |
+| **Window / analytic** (`… OVER (…)`) | ranks / running totals | Sigma window function — place deliberately, see below |
+| **FIXED / LOD** (`FIXED (BY …)`) | level-of-detail | Sigma level-of-detail — do NOT flatten |
+
+The discovery step classifies each Beast Mode via the standalone Beast Mode
+template's API flags — **no SQL parsing** (see `refs/connection.md`):
+- `analytic: true` → window/analytic
+- `aggregated: true` → aggregate
+- neither → projection (row-level calc column)
+- expression contains `FIXED(…)` → LOD
+
+### Window / analytic Beast Modes
+Domo window functions — `RANK() OVER`, `SUM() OVER (PARTITION BY …)`, running
+totals — are **OFF by default in Beast Mode (CSM / support-gated)**. That's a
+real reason "projection window" Beast Modes often don't carry over, and why you
+may see them referenced but erroring in the source. Map them to Sigma
+`Rank` / `SumOver` / `CountOver` — **but** those **silently error in
+workbook-master and DM calc columns** (see `feedback_sigma_window_functions`).
+Place them deliberately (in a context where the `*Over` family works) and
+**warn** — never silently drop them.
+
+---
+
 ## Normalize BEFORE translating
 
 Apply these to the raw Beast Mode string first:
@@ -41,6 +90,7 @@ Apply these to the raw Beast Mode string first:
 | `WEEKDAY(d)` | MySQL WEEKDAY (0=Mon) | replaced with `DAYOFWEEK` (1=Sun) | `Weekday([d])` — mind the 1=Sunday base |
 | `SQRT(x)` | square root | **unsupported** in Beast Mode | use `Power([x], 0.5)` if it appears |
 | Summary Number Beast Mode | a column | must be aggregated to be a summary | maps to a Sigma **KPI** element — see `refs/card-to-element.md` Rule 0 (KPI, never a table) |
+| `SUM(SUM([x]) FIXED (BY [Region]))` | a nested aggregate | **level-of-detail** (LOD) | Sigma **level-of-detail** — do NOT flatten to a plain aggregate; flag for review (see `lod_conditional_inner`) |
 
 ---
 
@@ -83,8 +133,8 @@ Apply these to the raw Beast Mode string first:
 | Beast Mode | Sigma |
 |---|---|
 | `CASE WHEN c THEN a ELSE b END` | `If(c, a, b)` |
-| `CASE WHEN c1 THEN 1 WHEN c2 THEN 2 END` | `Switch`/nested `If` — Sigma `If(c1,1,If(c2,2,null))` |
-| `CASE col WHEN x THEN a WHEN y THEN b END` | `If([col]=x, a, If([col]=y, b, null))` |
+| `CASE WHEN c1 THEN 1 WHEN c2 THEN 2 END` | **native multi-pair** `If(c1, 1, c2, 2, null)` — no nesting needed |
+| `CASE col WHEN x THEN a WHEN y THEN b END` | `If([col]=x, a, [col]=y, b, null)` |
 | `col IN (v1, v2, ...)` | **`[col]=v1 or [col]=v2 ...`** — Sigma has **no `IsIn`** (see `feedback_sigma_formula_isin`) |
 | `col LIKE '%TX%'` | `Contains([col], "TX")` |
 | `col LIKE 'TX%'` | `StartsWith([col], "TX")` |
@@ -92,6 +142,16 @@ Apply these to the raw Beast Mode string first:
 | `col LIKE '_hn%'` | regex: `RegexpMatch([col], "^.hn.*")` (`_`→`.`, `%`→`.*`) |
 | `IFNULL(x, d)` | `Coalesce([x], d)` |
 | `NULLIF(a, b)` | `If([a]=[b], null, [a])` |
+
+### Multi-condition `If` — the "IF with multiple conditions chokes" fix
+Sigma's `If` is **natively multi-pair**: `If(c1, v1, c2, v2, …, else)`. You do
+**NOT** nest `If`s for a multi-branch `CASE`. Two rules that cause the "chokes"
+failure when broken:
+- **All value branches must return the SAME type.** Mixed types (e.g. a number in
+  one branch, a string in another) **throw**. Cast so every branch matches.
+- **`and` / `or` / `not` must be INFIX operators**, e.g. `[a] > 1 and [b] < 2`.
+  The function-call forms `And(…)` / `Or(…)` / `Not(…)` **silently null the row**
+  — they don't error, the result just goes blank.
 
 ---
 

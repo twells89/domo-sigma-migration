@@ -41,13 +41,13 @@ have been a table is a smaller error than the reverse (which is what shipped).
 
 ### What to pull from the Summary Number config (Tier A card def)
 The card definition's summary-number block gives you everything a Sigma KPI
-needs — do **not** re-derive it:
-| Domo summary-number field | Use for Sigma KPI |
-|---|---|
-| summary column | the value column |
-| aggregation (`SUM`/`AVG`/`COUNT`/`MIN`/`MAX`/…) | wrap the column in the matching Sigma aggregate (`Sum`/`Avg`/`Count`/…) |
-| label | the KPI `name` |
-| number format (currency / percent / abbreviated / decimals) | the KPI column `format` (see number-format map below) |
+needs — do **not** re-derive it. The confirmed paths (Shape A `Component`):
+| Domo summary-number field | Confirmed path | Use for Sigma KPI |
+|---|---|---|
+| summary value column | `summaryNumber.columns[].column` | the value column |
+| aggregation (`SUM`/`AVG`/`COUNT`/`MIN`/`MAX`/…) | `summaryNumber.columns[].aggregation` | wrap the column in the matching Sigma aggregate (`Sum`/`Avg`/`Count`/…) — **but see the COUNT-of-id rule with the shape block below** |
+| label | `summaryNumber.columns[].alias` | the KPI `name` |
+| number format (currency / percent / abbreviated / decimals) | `summaryNumber.columns[].format` | the KPI column `format` (see number-format map below) |
 
 On **Tier B** (PNG only), read the number, its label, and its format straight
 off the render, and infer the aggregate from the label ("Total …" → Sum,
@@ -58,17 +58,29 @@ off the render, and infer the aggregate from the label ("Total …" → Sum,
 {
   "id": "<eid>",
   "kind": "kpi-chart",
-  "name": "Missing SOLs",                       // the summary-number label
+  "name": "Total Sales",                          // the summary-number label
   "source": { "elementId": "m-master", "kind": "table" },
   "columns": [
-    { "id": "v-missing-sols",
-      "formula": "Count([SOL Id])",             // summary col wrapped in its aggregate
-      "name": "Missing SOLs",
+    { "id": "v-total-sales",
+      "formula": "Sum([Master/Sales Amount])",    // summary MEASURE wrapped in its aggregate, WITH source prefix
+      "name": "Total Sales",
       "format": { "type": "number", "decimalPlaces": 0 } }
   ],
-  "value": { "columnId": "v-missing-sols" }      // ⚠ columnId, NOT id
+  "value": { "columnId": "v-total-sales" }         // ⚠ columnId, NOT id
 }
 ```
+
+> **A KPI's value is the summary number's `aggregation` applied to its `column` —
+> NEVER `Count` of the row-key/id. Domo TABLE cards default their summary number
+> to `COUNT` of the bound (usually id/first) column; if the extracted
+> summaryNumber has `aggregation: COUNT` on an id-like key
+> (`_defaultCountSuspect: true` from discovery), treat it as Domo's default and
+> use the card's authored measure instead.**
+>
+> The formula MUST carry the source prefix — `Sum([<Source>/Measure])`, e.g.
+> `Sum([Master/Sales Amount])`. A bare `Count([id])` with no prefix is Sigma's
+> **#1 KPI error** (and doubly wrong here: it counts a row-key, not a measure).
+
 Load-bearing details (each has burned a prior build):
 - **`value` takes `{"columnId": …}`, not `{"id": …}`.** Posting `value.id` is
   rejected at POST (`value.columnId: Invalid string: undefined`). Donut/pie use
@@ -101,31 +113,94 @@ So:
 
 ## Full card-type → element map
 
-`chartType` tokens below are **best-effort — confirm against the live card def**
-(they are `TODO(on-access)` like the rest of the private-API shapes). The PNG is
-authoritative; use this to translate once you've read the image.
+**The card's top-level `type` is almost always `"kpi"`** — that is Domo's umbrella
+type for analyzer viz cards, NOT a signal that the tile is a single number. The
+real viz kind lives in the **`chartType`** string, and those tokens are
+**`badge_`-prefixed** (`badge` is a *universal prefix* on analyzer chart tokens,
+not a standalone single-value token). Officially confirmed tokens:
+`badge_vert_bar` (vertical bar) and `badge_xyscatterplot` (scatter). The others
+below (`badge_horiz_bar`, `badge_datagrid`, `badge_line`, `badge_pie`, …) are
+**plausible-but-unconfirmed** naming conventions.
 
-| Domo card (what the PNG shows) | Likely `chartType` token | Sigma element `kind` | Notes |
+**Detect on the SUBSTRING, not an exhaustive enum.** Key off the substrings
+`*bar*`, `*line*`, `*pie*`, `*scatter*`, `datagrid`/`table`,
+`singlevalue`/`summary` inside the `chartType` string. The PNG stays
+authoritative; use this table to translate once you've read the image.
+
+| Domo card (what the PNG shows) | `chartType` substring / token | Sigma element `kind` | Notes |
 |---|---|---|---|
-| **Single big number** (see Rule 0) | `badge`, `singlevalue`, `summary` | `kpi-chart` | Rule 0. |
-| **Table** (rows are the point) | `table`, `datatable` | `table` | Only when the grid itself is the content, not a summary number. |
-| **Pivot table** | `pivottable`, `pivot` | `pivot-table` | Needs both `rowsBy` **and** `columnsBy` — see `feedback_sigma_pivot_rowsby_columnsby`. |
-| Bar (vertical) | `bar`, `stackedbar`, `groupedbar` | `bar-chart` | orientation vertical. |
-| Bar (horizontal) | `horizontalbar`, `horizontalstackedbar` | `bar-chart` | set horizontal orientation — see `sigma-bar-orientation-and-datelookback`. |
-| Line | `line`, `multiline` | `line-chart` | |
-| Area / stacked area | `area`, `stackedarea` | `area-chart` | |
+| **Single big number** (see Rule 0) | `singlevalue`, `summary` (e.g. `badge_singlevalue`) | `kpi-chart` | Rule 0. |
+| **Table** (rows are the point) | `datagrid`, `table` (e.g. `badge_datagrid`) | `table` | Only when the grid itself is the content, not a summary number. |
+| **Pivot table** | `pivot` (e.g. `badge_pivottable`) | `pivot-table` | Needs both `rowsBy` **and** `columnsBy` — see `feedback_sigma_pivot_rowsby_columnsby`. |
+| Bar (vertical) | `badge_vert_bar` ✓ **confirmed** (`*bar*`) | `bar-chart` | orientation vertical. |
+| Bar (horizontal) | `badge_horiz_bar` (`*bar*`) | `bar-chart` | set horizontal orientation — see `sigma-bar-orientation-and-datelookback`. |
+| Line | `*line*` (e.g. `badge_line`) | `line-chart` | |
+| Area / stacked area | `*area*` (e.g. `badge_stackedarea`) | `area-chart` | |
 | Combo (bar + line) | `combo`, `barline` | `combo-chart` | explicit `yAxis2`; `columnIds` a subset — see `sigma-combo-dual-axis`. |
-| Pie / Donut | `pie`, `donut` | `donut-chart` | value uses `value.id` (NOT `columnId`) — opposite of KPI. |
+| Pie / Donut | `*pie*` (e.g. `badge_pie`) | `donut-chart` | value uses `value.id` (NOT `columnId`) — opposite of KPI. |
 | Gauge (dial) | `gauge`, `dialgauge` | `kpi-chart` | Sigma has no dial; render as KPI + note the gauge target as a follow-up. |
-| Scatter / Bubble | `scatter`, `bubble` | `scatter-chart` | both axes measures; dimension → color. |
+| Scatter / Bubble | `badge_xyscatterplot` ✓ **confirmed** (`*scatter*`, `bubble`) | `scatter-chart` | both axes measures; dimension → color. |
 | Heatmap | `heatmap` | `pivot-table` w/ conditional format, or `heatmap` if available | confirm element support. |
 | Funnel / Waterfall / Treemap / Sunburst / Sankey | various | closest Sigma kind + **warn** | Sigma may lack an exact match; pick nearest and flag in Phase 5e, don't silently substitute. |
 | Text / Title card | `text`, `title` | text element | |
 | Map (geo) | `map`, `choropleth` | Sigma map element if available, else table + warn | |
 
-If a Domo `chartType` isn't in this table, **read the PNG, pick the nearest
-Sigma kind, and emit a Phase-5e warning** — never guess silently (see fidelity
-discipline below).
+If a Domo `chartType` substring isn't in this table, **read the PNG, pick the
+nearest Sigma kind, and emit a Phase-5e warning** — never guess silently (see
+fidelity discipline below).
+
+---
+
+## Domo bar chart → Sigma **bar-chart**, NOT a table with data bars
+
+Reported bug: a Domo bar chart came out as a Sigma **table with in-cell data
+bars**. These are two different things — don't substitute one for the other.
+
+- A **real bar chart** has `chartType` = a `badge_*bar*` token (e.g.
+  `badge_vert_bar`, `badge_horiz_bar`). Emit a Sigma **`kind: bar-chart`** with
+  `xAxis` / `yAxis` bindings (orientation per
+  `sigma-bar-orientation-and-datelookback`). This is the correct target.
+- Sigma **table data bars** (`kind: table` + `conditionalFormats[].type:
+  dataBars`) are reserved **only** for a real Domo `badge_datagrid`/table card
+  that has in-cell bars via its own `conditionalFormats[]` (see
+  `sigma-table-databars-spec`). Detect that case from the Domo card's
+  `conditionalFormats[]`, not from the fact that the data would "fit" in a table.
+- **Never substitute a table+dataBars for a bar chart.** A grid where the source
+  showed bars is a fidelity failure (checked in the Phase 5e QA list below).
+
+---
+
+## Formatting fidelity
+
+Three reported bugs, all formatting, all spec-settable:
+
+### Column display names (bug #4)
+Raw snake_case column names come through when the author's clean label is
+ignored. Use the Domo **alias** as the display name, in this priority order:
+- **Shape A:** `chartBody.columns[].alias` / `summaryNumber.columns[].alias`.
+- **Shape B:** the equivalent alias on `definition.subscriptions.main.columns[]`.
+- **Fall back** to the raw `column`, then run it through
+  `format_sigma_display_name` (snake_case → Title Case) only as a last resort.
+
+Never emit the raw `column` when an `alias` exists.
+
+### Table text wrap (bug #5)
+Long-text table cells that overflow are fixable in the spec — this is **not**
+UI-only. Set it per-column or via the theme default:
+- Per column: `columns[].style.textWrap: "wrap"` (enum `wrap | clip`).
+- Theme default: `themeOverrides.tableStyles.textStyles.*.textWrap`.
+
+Set `"wrap"` on long-text columns so they don't clip.
+
+### Axis / gridline defaults (bug #8)
+Domo charts render visually clean; Sigma's defaults show gridlines and axis
+labels, so a faithful port looks busier than the source. Default new charts to:
+- **Gridlines off:** `xAxis.format.marks: "none"` and `yAxis.format.marks:
+  "none"` (enum `none | tick | grid | both`).
+- **Match the source's axis-label visibility:** if Domo hid a label, set
+  `format.labels: "hidden"` (or `format.visibility: "hidden"`) on that axis.
+
+Only turn marks/labels back on where the source PNG actually showed them.
 
 ---
 
@@ -183,6 +258,18 @@ Add these to the mandatory layout-visual-qa gate:
       Zero KPIs when the source has summary tiles = **fail**.
 - [ ] No Sigma **table** element stands where the Domo tile showed a single
       number.
+- [ ] **No KPI's value formula is `Count` / `CountDistinct` of the DM primary /
+      row-key column** — that's Domo's default summary aggregate, not the authored
+      measure (see the COUNT-of-id rule under Rule 0).
+- [ ] **Filter fan-out:** every element on a page responds to each page control —
+      no element is left un-bound (a control silently no-ops if not wired to it).
 - [ ] Every Domo page filter → a Sigma control; every card filter → an element
       filter (filter-inventory diff is clean).
+- [ ] **No Sigma `table` + `dataBars` stands where the Domo card was a bar
+      chart** — a `badge_*bar*` card must be a `bar-chart` (see the bar-vs-table
+      rule above).
+- [ ] **Long-text table columns carry `textWrap: "wrap"`** (bug #5) so cells
+      don't clip.
+- [ ] **Chart axes default to `format.marks: "none"`** (gridlines off) unless the
+      source PNG actually showed gridlines (bug #8).
 - [ ] Any KPI that had a Domo spark/trend carries a "bind trend in UI" warning.

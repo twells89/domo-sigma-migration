@@ -11,9 +11,11 @@
 # All methods return parsed Hash/Array (or raw String for csv export). HTTP errors
 # raise Domo::Error with the response body included.
 #
-# STATUS: auth + public endpoints follow Domo's documented API. Private endpoints
-# are reconstructed from community sources — CONFIRM response shapes on first
-# contact with a live instance (see refs/connection.md "Open questions").
+# STATUS: auth + public endpoints follow Domo's documented API. Private endpoint
+# shapes are now confirmed against Domo's OpenAPI ("Get Chart Card Definition") and
+# three production reference impls (jsade/domo-query-cli, brycewc/domo-toolkit,
+# newli5737/domo-chousa). Field paths still want a final check on first contact
+# with a live instance (see refs/connection.md).
 
 require 'net/http'
 require 'uri'
@@ -147,9 +149,64 @@ module Domo
     res
   end
 
-  # TODO(on-access): confirm the `parts` values and the response JSON shape.
-  def card_definition(card_id, parts: 'metadata,datasources,problems')
+  # PUT against the private API that returns a parsed JSON body (vs private_put_raw,
+  # which returns the raw response for binary/render calls). Returns nil on Tier B.
+  def private_put(path, body:, query: nil)
+    res = private_put_raw(path, body: body, query: query)
+    return nil if res.nil?
+    res.body.to_s.empty? ? {} : JSON.parse(res.body)
+  end
+
+  # ---- Card definition: TWO shapes ----------------------------------------
+  # Domo exposes a card's definition in two different shapes with DIFFERENT field
+  # names. The extractor (domo-discover.rb) normalizes both into one record.
+  #
+  #  Shape A — official OpenAPI "CardDefinition" (parts form). `chartBody` and
+  #    `summaryNumber` are Component objects: .columns[]{column,alias,aggregation,
+  #    format,mapping,calendar,order}; calculatedFields[]{formula,id,name,
+  #    saveToDataSet}; conditionalFormats[]{condition,format,savedToDataSet};
+  #    chartType is a free string. groupBy/orderBy/filters/projection nest INSIDE
+  #    the Component, not at top level.
+  def card_definition(card_id, parts: 'metadata,properties,datasources')
     private_get('/api/content/v1/cards', query: { urns: card_id, parts: parts })
+  end
+
+  #  Shape B — internal analyzer definition (what the app + production tools pull).
+  #    Response wrapped under a top-level `definition`:
+  #      definition.subscriptions.main.{columns[]{column,formulaId}, filters[],
+  #        orderBy[], groupBy[]}, definition.formulas[]{id,name,columnPositions}.
+  #    Beast-mode refs are ids prefixed "calculation_<uuid>" joining to a formula.
+  #    Refs: brycewc/domo-toolkit, newli5737/domo-chousa, jsade/domo-query-cli.
+  def card_definition_v3(card_id)
+    private_put('/api/content/v3/cards/kpi/definition',
+                body: { dynamicText: true, variables: true, urn: card_id })
+  end
+
+  # Standalone Beast Mode ("function template"). The `expression` field carries the
+  # formula text; `aggregated`/`analytic` classify it WITHOUT parsing SQL:
+  #   analytic:true  => window/analytic  (RANK/…​ OVER, PARTITION BY)
+  #   aggregated:true => aggregate        (wrap at workbook/element level)
+  #   else            => projection/row-level (Sigma DM calc column)
+  # `legacyId` == the "calculation_<uuid>" id seen in card refs.
+  def beast_mode_template(fn_id)
+    private_get("/api/query/v1/functions/template/#{fn_id}")
+  end
+
+  # DataSet metadata WITH Beast Mode formulas. properties.formulas.formulas is a
+  # MAP keyed by formula id (iterate values), each {id,name,formula,templateId,
+  # persistedOnDataSource,columnPositions,...}. persistedOnDataSource:true = a
+  # dataset-level Beast Mode (vs card-local).
+  def dataset_formulas(ds_id)
+    private_get("/api/data/v3/datasources/#{ds_id}", query: { parts: 'core,permission,formulas' })
+  end
+
+  # Enumerate cards bound to a DataSet / on a page (private API).
+  def cards_for_dataset(ds_id)
+    private_get("/api/content/v1/datasources/#{ds_id}/cards", query: { drill: true })
+  end
+
+  def cards_for_page(page_id, parts: 'metadata,datasources')
+    private_get("/api/content/v3/stacks/#{page_id}/cards", query: { parts: parts })
   end
 
   def page_layout(page_id)
