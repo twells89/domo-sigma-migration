@@ -73,7 +73,35 @@ To enumerate all cards bound to a DataSet before fetching definitions:
 GET {instance}.domo.com/api/content/v1/datasources/{datasetId}/cards?drill=true
 ```
 
-⚠️ The exact JSON field paths for sort/filter/series are **TODO(on-access)** — the endpoint and `parts` mechanism are confirmed, the field names need verifying on a live instance.
+The card-def / filter / summary field paths below are **doc-confirmed (OpenAPI +
+reference impls)** — do a final field-path check on first live contact.
+
+### The TWO card-definition shapes
+
+There are two ways to get a card definition, with **different JSON shapes**. The
+extractor (`domo-discover.rb`) auto-detects and normalizes both.
+
+**Shape A — official OpenAPI `CardDefinition`** (the `parts` form):
+```bash
+GET /api/content/v1/cards?urns={cardId}&parts=metadata,properties,datasources
+```
+- `chartBody` and `summaryNumber` are **`Component`** objects, each with
+  `.columns[].{column, alias, aggregation, format}`.
+- `calculatedFields[]` — inline card calcs; `conditionalFormats[]` — cell/bar
+  formatting; `chartType` — a free-form string (see `refs/card-to-element.md`).
+- `groupBy` / `orderBy` / `filters` / `projection` nest **INSIDE** the Component
+  (not at the card root).
+
+**Shape B — internal analyzer def**:
+```bash
+PUT /api/content/v3/cards/kpi/definition
+     body { "dynamicText": true, "variables": true, "urn": "<cardId>" }
+```
+Response is under `definition`:
+- `definition.subscriptions.main.{columns[].{column, formulaId}, filters[], orderBy[], groupBy[]}`
+- `definition.formulas[]` — the card's formula list.
+- Beast-mode references here are **ids prefixed `calculation_<uuid>`** (match
+  these against the standalone Beast Mode template endpoint below).
 
 ### Filter object shape (inferred from embed SDK — confirm on live instance)
 
@@ -91,18 +119,51 @@ Beast Mode formula text is NOT only in the private card API. The DataSet respons
 GET {instance}.domo.com/api/data/v3/datasources/{datasetId}?parts=core,permission,formulas
 ```
 
+⚠️ `properties.formulas.formulas` is a **map keyed by id** — **iterate its
+values, not an array**. Each value is
+`{ id, name, formula, templateId, persistedOnDataSource, … }`.
+`persistedOnDataSource: true` (or, on a card, `saveToDataSet`) marks a
+**dataset-level** Beast Mode; otherwise it's **card-local**.
+
 This means formula-layer extraction (Beast Mode → Sigma formula translation) can run on the **public** API path — no private token needed for that step. The private card API is needed for which columns/filters/sorts a specific card applies, not the formula definitions themselves.
 
-### Third-party reference implementation
+### Standalone Beast Mode (function template) endpoint — classify without SQL parsing
 
-[`domolibrary`](https://github.com/jaewilson07/domo_library) (Jae Wilson / DataCrew) is an open-source Python SDK built specifically around these private endpoints — independent confirmation they're real and in active use. Its architecture separates raw "route functions" (one per API call) from higher-level class functions, so when Domo bumps an endpoint version you swap one route. Worth adopting the same pattern in `domo_rest.rb`.
+```bash
+GET {instance}.domo.com/api/query/v1/functions/template/{id}
+```
+Returns a single Beast Mode's definition:
+- **`expression`** — the formula text.
+- **`aggregated`** and **`analytic`** booleans — classify aggregate vs window
+  **without any SQL parsing** (`analytic:true`→window, `aggregated:true`→aggregate,
+  else projection — see `refs/beast-mode-to-sigma.md`).
+- **`legacyId`** == the `calculation_<uuid>` id used in Shape-B card defs — this
+  is how you join a card's `formulaId` reference back to its expression.
 
-### Endpoints (best-effort — CONFIRM shapes on first contact)
+### Third-party reference implementations
+
+The old `jaewilson07/domolibrary` (a.k.a. `domo-toolkit`) GitHub repo is now a
+**404** — don't link it. (The `domolibrary` **PyPI** package still exists, but the
+source repo is gone.) The live reference impls that exercise these private
+endpoints — independent confirmation they're real and in active use:
+- [`jsade/domo-query-cli`](https://github.com/jsade/domo-query-cli) — TypeScript,
+  **generated from Domo's OpenAPI**. This is the **best field-name source** when
+  you need to confirm an exact JSON path.
+- [`brycewc/domo-toolkit`](https://github.com/brycewc/domo-toolkit) — JavaScript.
+- [`newli5737/domo-chousa`](https://github.com/newli5737/domo-chousa) — Python
+  crawler.
+
+The "route function per API call" pattern (one function per endpoint, swap one on
+a version bump) is still worth adopting in `domo_rest.rb`.
+
+### Endpoints (doc-confirmed — OpenAPI + reference impls; final field-path check on first live contact)
 | Call | Use |
 |---|---|
-| `GET /api/content/v1/cards?urns={ids}&parts=metadata,properties,datasources` | **card definitions** ⭐ (confirmed endpoint + parts) |
+| `GET /api/content/v1/cards?urns={ids}&parts=metadata,properties,datasources` | **card definitions — Shape A** ⭐ (OpenAPI `CardDefinition`) |
+| `PUT /api/content/v3/cards/kpi/definition` (body `{dynamicText,variables,urn}`) | **card definitions — Shape B** (internal analyzer def; `definition.subscriptions.main`) |
+| `GET /api/query/v1/functions/template/{id}` | **standalone Beast Mode** — `expression` + `aggregated`/`analytic` flags; `legacyId`=`calculation_<uuid>` |
 | `GET /api/content/v1/datasources/{datasetId}/cards?drill=true` | enumerate cards per DataSet |
-| `GET /api/content/v1/cards/kpi/definition/{cardId}` | full KPI/chart def incl. Beast Mode SQL (alt form) |
+| `GET /api/content/v1/cards/kpi/definition/{cardId}` | full KPI/chart def incl. Beast Mode SQL (alt GET form) |
 | `GET /api/content/v1/pages/{pageId}` | page layout — collections + card geometry |
 | `PUT /api/content/v1/cards/kpi/{cardId}/render?parts=image` | **render card → PNG** ⭐ (visual reference) |
 | `PUT /api/content/v1/cards/kpi/{cardId}/render?parts=imagePDF` | render card → PDF |

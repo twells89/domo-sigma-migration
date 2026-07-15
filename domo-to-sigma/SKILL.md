@@ -11,13 +11,17 @@ user-invocable: true
 
 # Domo → Sigma Conversion
 
-> **STATUS: DRAFT / BLOCKED ON API ACCESS.** This skill is scaffolded from
-> research but not yet validated against a live Domo instance. The auth path and
-> the *public* API endpoints are documented and ready; the **private/internal
-> API** endpoints (card definitions, Beast Mode text, page layout) are
-> best-effort and must be confirmed on first contact with a real instance.
-> Design rationale + open questions live in `../research/domo-to-sigma.md`.
-> Before running for a customer, resolve the **Open questions** at the bottom.
+> **STATUS: VALIDATED — final live field-path check recommended.** The
+> private-API shapes (card definitions, Beast Mode text, page layout) are now
+> **doc-confirmed** against Domo's OpenAPI + official docs + three production
+> reference impls, and the skill has been exercised on a **real customer
+> engagement**. The public OAuth path is documented and stable. What remains is a
+> final field-path check on first contact with each new instance — private
+> endpoints can vary by Domo version. Design rationale + remaining open questions
+> live in `../research/domo-to-sigma.md`.
+> **Compliance (unchanged):** before a production run, confirm with the customer's
+> Domo account team that programmatic extraction for migration is acceptable —
+> see `refs/connection.md` "Compliance note".
 
 **Read ALL of the following before replying or taking any action:**
 - `../research/domo-to-sigma.md` — object model, API surface, scope, open questions
@@ -46,18 +50,29 @@ Domo) and *layout/binding* (cards → Sigma elements on a 24-col grid).
 | `scripts/lib/domo_rest.rb` | prereq | Domo REST wrapper (public + private), auto token refresh |
 | `scripts/domo-discover.rb` | 1 | Enumerate DataSets, pages, cards; pull schemas + (private) card defs + Beast Modes |
 | `scripts/domo-capture-visuals.rb` | 1b | Render per-card PNG + full-page PDF, normalize card geometry → layout JSON (design-fidelity reference) |
-| `scripts/convert-beast-modes.rb` | 2 | Beast Mode SQL → Sigma formula via `convert_sql_to_sigma_formula` |
-| `scripts/build-dm.rb` | 3 | DataSet schema + calc columns → Sigma DM spec |
-| `post-and-readback.rb` *(reuse from tableau-to-sigma)* | 4 | POST DM/WB + capture server element IDs |
-| `scripts/build-workbook.rb` | 5 | Card defs → Sigma chart/table/KPI elements |
-| `build-dashboard-layout.rb` *(reuse)* | 5d | Card geometry → 24-col grid XML |
-| `put-layout.rb` *(reuse)* | 5d | PUT layout to workbook |
-| `verify-parity.rb` *(reuse)* | 6 | Compare Domo `query/execute` aggregations vs Sigma `query` |
-| `assert-phase6-ran.rb` *(reuse)* | 6 | Hard gate before declaring GREEN |
+| `scripts/convert-beast-modes.rb` | 2 | Beast Mode → Sigma: Domo-specific normalize + classify + POST-lint around `convert_sql_to_sigma_formula` |
+| `scripts/build-dm.rb` | 3 | DataSet schema + projection calc columns → Sigma DM spec (clean display names) |
+| `post-and-readback.rb` *(vendored)* | 4 | POST DM/WB + capture server element IDs / column labels |
+| `scripts/build-workbook.rb` | 5 | Cards → Sigma chart/table/KPI element specs (`chart-specs.json`) + controls |
+| `build-workbook-spec.rb` *(vendored)* | 5 | Assemble master + pages from `chart-specs.json` + `dm-ids.json` → POST-ready workbook spec |
+| `scripts/qa-check.rb` | 5e | Domo-specific spec gate: KPI-not-count-of-id, filter fan-out, no bar-as-table, text-wrap, gridlines-off |
+| `scripts/build-domo-layout.rb` | 5d | Domo card geometry → zone-schema `dashboard-layout.json` (relative-normalized) |
+| `build-dashboard-layout.rb` *(vendored)* | 5d | Zone JSON → 24-col grid XML |
+| `put-layout.rb` *(vendored)* | 5d | PUT layout to workbook |
+| `verify-parity.rb` *(vendored)* | 6 | Compare Domo `query/execute` aggregations vs Sigma `query` |
+| `assert-phase6-ran.rb` *(vendored)* | 6 | Hard gate before declaring GREEN (run with `--workdir`) |
 
-> Scripts marked *(reuse)* are symlinked/vendored from `tableau-to-sigma/scripts/`.
-> Scripts NOT marked reuse are Domo-specific and currently **stubs** — they
-> document the endpoint + expected shape with `TODO` markers to wire on access.
+> The Domo-specific scripts — `convert-beast-modes.rb` (2), `build-dm.rb` (3),
+> `build-workbook.rb` + `qa-check.rb` (5), `build-domo-layout.rb` (5d), plus
+> `get-token.sh`, `lib/domo_rest.rb`, `lib/domo_sigma_util.rb`, `domo-discover.rb`,
+> `domo-capture-visuals.rb` — now **exist** (no longer stubs) and have unit +
+> end-to-end tests under `test/`. A final live field-path check on first instance
+> contact is still recommended.
+>
+> Scripts marked *(vendored)* are **copied from the `tableau-to-sigma` skill** (with
+> a provenance header citing the source commit) so this repo is self-contained /
+> clone-safe — they are source-agnostic (operate on Sigma DM/workbook specs, no
+> `.twb` parsing). Fix upstream and re-vendor; don't diverge the local copies.
 
 ---
 
@@ -168,6 +183,12 @@ formatting that the chartType string alone misses.
 
 Then translate the rest per the ref:
 - Domo chart type → Sigma chart kind (full table in `refs/card-to-element.md`)
+- **KPI value guard:** a KPI's value is the summary number's aggregate of the
+  authored **measure** (with a source prefix, e.g. `Sum([Master/Sales Amount])`) —
+  **never `Count`/`CountDistinct` of the DM primary/row-key column** (that's Domo's
+  default summary aggregate). See `refs/card-to-element.md` Rule 0 COUNT-of-id rule.
+- **Bar vs table:** a `badge_*bar*` card → Sigma `bar-chart`, **NOT** a
+  `table` + dataBars. See `refs/card-to-element.md` bar-vs-table rule.
 - axis / series / sort / Top-N binding
 - pivot cards → `rowsBy` + `columnsBy` arrays (see `feedback_sigma_pivot_rowsby_columnsby`)
 - page filters → workbook controls; card-level filter clauses → element filters
