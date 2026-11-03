@@ -5,6 +5,8 @@
 #   plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/assert-phase6-ran.rb
 # Fix upstream and re-vendor; do not diverge this copy. Vendored for the
 # standalone domo-sigma-migration repo (clone-safety) per the domo-build-pipeline plan.
+# LOCAL DIVERGENCE: workbook /spec endpoints (deprecated, OpenAPI 2.0.0+20261030) replaced by
+# /v2/workbooks[/{id}[/contents]] via lib/workbook_endpoints.rb; re-vendor once upstream carries this.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Hard gate that proves a tableau-to-sigma conversion is actually complete.
@@ -443,7 +445,7 @@ unless opts[:skip_layout]
     if base.nil? || base.empty? || tok.nil? || tok.empty?
       warn "[SKIP] gate 4/7: SIGMA_BASE_URL / SIGMA_API_TOKEN not set — cannot fetch spec"
     else
-      uri = URI("#{base}/v2/workbooks/#{wb_id}/spec")
+      uri = URI("#{base}/v2/workbooks/#{wb_id}?includeContents=true")
       req = Net::HTTP::Get.new(uri)
       req['Authorization'] = "Bearer #{tok}"
       req['Accept'] = 'application/json'
@@ -459,6 +461,7 @@ unless opts[:skip_layout]
             require 'date'
             YAML.safe_load(body, permitted_classes: [Date, Time]) || {}
           end
+          spec = spec['contents'] if spec.is_a?(Hash) && spec['contents'].is_a?(Hash) # the document is under `contents`
         layout_xml = spec['layout'].to_s
         elem_count = layout_xml.scan(/<LayoutElement\b/).length
         live_layout_positioned = elem_count
@@ -517,7 +520,7 @@ unless opts[:skip_layout]
           puts "[OK] gate 4/7: layout XML applied with #{elem_count} positioned element(s)"
         end
       else
-        warn "[SKIP] gate 4/7: GET /v2/workbooks/#{wb_id}/spec returned HTTP #{res.code} — cannot verify"
+        warn "[SKIP] gate 4/7: GET /v2/workbooks/#{wb_id}?includeContents=true returned HTTP #{res.code} — cannot verify"
       end
     end
   end
@@ -589,7 +592,7 @@ else
       warn "[SKIP] gate 6/7: scripts/lib/layout_lint.rb not vendored in this plugin — re-vendor (md5 discipline)"
     end
     if defined?(LayoutLint)
-      uri = URI("#{base}/v2/workbooks/#{wb_id}/spec")
+      uri = URI("#{base}/v2/workbooks/#{wb_id}?includeContents=true")
       req = Net::HTTP::Get.new(uri)
       req['Authorization'] = "Bearer #{tok}"
       req['Accept'] = 'application/json'
@@ -603,6 +606,7 @@ else
             require 'date'
             YAML.safe_load(res.body, permitted_classes: [Date, Time]) || {}
           end
+          spec = spec['contents'] if spec.is_a?(Hash) && spec['contents'].is_a?(Hash) # the document is under `contents`
         violations = LayoutLint.lint(spec)
         if violations.any?
           warn "[FAIL] gate 6/7: layout lint — #{violations.length} violation(s) on live workbook #{wb_id}:"
@@ -615,7 +619,7 @@ else
         puts '[OK] gate 6/7: layout lint clean (no raw-id names, no orphan controls, no dead zones, ' \
              'no generic header title, no under-filled bands)'
       else
-        warn "[SKIP] gate 6/7: GET /v2/workbooks/#{wb_id}/spec returned HTTP #{res.code} — cannot lint"
+        warn "[SKIP] gate 6/7: GET /v2/workbooks/#{wb_id}?includeContents=true returned HTTP #{res.code} — cannot lint"
       end
     end
   end
@@ -655,7 +659,7 @@ else
       warn "[SKIP] gate 7/7: scripts/lib/control_lint.rb not vendored in this plugin — re-vendor (md5 discipline)"
     end
     if defined?(ControlLint)
-      uri = URI("#{base}/v2/workbooks/#{wb_id}/spec")
+      uri = URI("#{base}/v2/workbooks/#{wb_id}?includeContents=true")
       req = Net::HTTP::Get.new(uri)
       req['Authorization'] = "Bearer #{tok}"
       req['Accept'] = 'application/json'
@@ -669,6 +673,7 @@ else
             require 'date'
             YAML.safe_load(res.body, permitted_classes: [Date, Time]) || {}
           end
+          spec = spec['contents'] if spec.is_a?(Hash) && spec['contents'].is_a?(Hash) # the document is under `contents`
         scope_path = opts[:control_scope] || File.join(opts[:tab], 'control-scope.json')
         scope = nil
         if File.exist?(scope_path)
@@ -691,7 +696,7 @@ else
         puts "[OK] gate 7/7: control lint clean (#{n_controls} control(s); no dead controls, no ghost " \
              "targets, full same-page reach#{scope ? ', source scope honored' : ''})"
       else
-        warn "[SKIP] gate 7/7: GET /v2/workbooks/#{wb_id}/spec returned HTTP #{res.code} — cannot lint"
+        warn "[SKIP] gate 7/7: GET /v2/workbooks/#{wb_id}?includeContents=true returned HTTP #{res.code} — cannot lint"
       end
     end
   end

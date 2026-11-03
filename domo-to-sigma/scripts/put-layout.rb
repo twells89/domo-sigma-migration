@@ -4,9 +4,11 @@
 #   plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/put-layout.rb
 # Fix upstream and re-vendor; do not diverge this copy. Vendored for the
 # standalone domo-sigma-migration repo (clone-safety) per the domo-build-pipeline plan.
+# LOCAL DIVERGENCE: workbook /spec endpoints (deprecated, OpenAPI 2.0.0+20261030) replaced by
+# /v2/workbooks[/{id}[/contents]] via lib/workbook_endpoints.rb; re-vendor once upstream carries this.
 # ─────────────────────────────────────────────────────────────────────────────
-# GET a workbook spec, replace per-page layouts with a single top-level layout
-# XML (provided), strip read-only fields, PUT back.
+# GET a workbook's code rep (?includeContents=true), replace per-page layouts with a
+# single top-level layout XML (provided), PUT back to /v2/workbooks/{id}/contents.
 #
 # Container layouts: a <GridContainer> in the layout XML must be paired with a
 # `kind: container` placeholder element in the spec (else it is silently
@@ -26,6 +28,7 @@ require 'json'
 require 'yaml'
 require 'date'
 require 'optparse'
+require_relative 'lib/workbook_endpoints'
 
 opts = {}
 OptionParser.new do |p|
@@ -52,7 +55,10 @@ end
 xml = File.read(opts[:layout], encoding: 'UTF-8')
 abort "FATAL: empty elementId in layout XML" if xml.match?(/elementId=""/)
 
-spec = JSON.parse(http(:get, "/v2/workbooks/#{opts[:wb]}/spec").body)
+# The read returns the document under `contents` (GET .../spec is deprecated);
+# keep the documentVersion so the PUT fails on a concurrent edit instead of overwriting it.
+raw  = JSON.parse(http(:get, WorkbookEndpoints.read_path(opts[:wb])).body)
+spec = WorkbookEndpoints.contents_of(raw)
 spec['pages'].each { |p| p.delete('layout') }
 spec['layout'] = xml
 
@@ -77,9 +83,9 @@ if File.exist?(elements_path)
   end
   puts "injected #{injected} container/header element(s) from #{elements_path}"
 end
-%w[workbookId url ownerId createdBy updatedBy createdAt updatedAt latestDocumentVersion].each { |k| spec.delete(k) }
-
-resp = http(:put, "/v2/workbooks/#{opts[:wb]}/spec", JSON.pretty_generate(spec))
+# `spec` is the document only (no envelope fields); PUT /contents takes {contents, documentVersion}.
+resp = http(:put, WorkbookEndpoints.update_path(opts[:wb]),
+            JSON.pretty_generate(WorkbookEndpoints.update_body(spec, document_version: raw['documentVersion'])))
 parsed = YAML.safe_load(resp.body, permitted_classes: [Date, Time])
 puts parsed['workbookId'] ? "PUT ok: workbookId=#{parsed['workbookId']}" : "ERROR: #{parsed.inspect}"
 exit(parsed['workbookId'] ? 0 : 1)

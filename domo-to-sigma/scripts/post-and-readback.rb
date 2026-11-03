@@ -4,6 +4,8 @@
 #   plugins/tableau-to-sigma/skills/tableau-to-sigma/scripts/post-and-readback.rb
 # Fix upstream and re-vendor; do not diverge this copy. Vendored for the
 # standalone domo-sigma-migration repo (clone-safety) per the domo-build-pipeline plan.
+# LOCAL DIVERGENCE: workbook /spec endpoints (deprecated, OpenAPI 2.0.0+20261030) replaced by
+# /v2/workbooks[/{id}[/contents]] via lib/workbook_endpoints.rb; re-vendor once upstream carries this.
 # ─────────────────────────────────────────────────────────────────────────────
 # POST a DM or workbook spec, parse the YAML response, then GET the spec back
 # and emit a clean JSON map of pages → elements with server-assigned IDs.
@@ -58,6 +60,7 @@ FileUtils.mkdir_p(opts[:workdir])
 $LOAD_PATH.unshift File.expand_path('lib', __dir__)
 require 'sigma_rest'
 require 'dm_quarantine'
+require 'workbook_endpoints'
 
 QUARANTINE = opts[:quarantine] && opts[:type] == 'datamodel'
 DEFERRED_PATH = File.join(opts[:workdir], 'deferred-elements.json')
@@ -65,9 +68,28 @@ warn 'NOTE: --quarantine-on-failure only applies to --type datamodel; ignored.' 
 
 BASE = ENV.fetch('SIGMA_BASE_URL')
 
-POST_PATH = opts[:type] == 'datamodel' ? '/v2/dataModels/spec'              : '/v2/workbooks/spec'
-GET_PATH  = opts[:type] == 'datamodel' ? '/v2/dataModels/%s/spec'           : '/v2/workbooks/%s/spec'
+DATA_MODEL = opts[:type] == 'datamodel'
+
+# Workbook endpoints: the /spec ones are deprecated (see lib/workbook_endpoints.rb);
+# data-model /spec endpoints are not.
+POST_PATH = opts[:type] == 'datamodel' ? '/v2/dataModels/spec'    : WorkbookEndpoints.create_path
+GET_PATH  = opts[:type] == 'datamodel' ? '/v2/dataModels/%s/spec' : '/v2/workbooks/%s?includeContents=true'
+PUT_PATH  = opts[:type] == 'datamodel' ? '/v2/dataModels/%s/spec' : '/v2/workbooks/%s/contents'
 ID_FIELD  = opts[:type] == 'datamodel' ? 'dataModelId'                      : 'workbookId'
+
+# Wire body for a create / update from the flat spec JSON on disk. Data models
+# go out unchanged; a workbook's document is sent as `contents`.
+def wire_body(raw, mode)
+  return raw if DATA_MODEL
+  spec = JSON.parse(raw)
+  JSON.generate(mode == :create ? WorkbookEndpoints.create_body(spec) : WorkbookEndpoints.update_body(spec))
+end
+
+# Parsed readback → the flat spec the checks below work on (workbook documents
+# come back under `contents`).
+def readback_spec(parsed)
+  DATA_MODEL ? parsed : WorkbookEndpoints.contents_of(parsed)
+end
 
 # Wraps a single Sigma REST call with automatic 401-retry-after-refresh
 # (tokens last ~1 hour; long conversions outlive a single token). Returns
@@ -124,7 +146,7 @@ if update_id
     out_spec = (YAML.safe_load(put_body, permitted_classes: [Date, Time]) rescue nil)
     if out_spec.is_a?(Hash) && out_spec['layout'].to_s.strip.empty?
       live = http(:get, format(GET_PATH, update_id))
-      live_spec = (YAML.safe_load(live.body, permitted_classes: [Date, Time]) rescue nil)
+      live_spec = (readback_spec(YAML.safe_load(live.body, permitted_classes: [Date, Time])) rescue nil)
       live_layout = live_spec.is_a?(Hash) ? live_spec['layout'].to_s : ''
       unless live_layout.strip.empty?
         # The layout XML references element ids. Banded layouts reference container
@@ -160,13 +182,13 @@ if update_id
       end
     end
   end
-  resp = http(:put, format(GET_PATH, update_id), put_body)
+  resp = http(:put, format(PUT_PATH, update_id), wire_body(put_body, :update))
   parsed = YAML.safe_load(resp.body, permitted_classes: [Date, Time])
   oid = parsed[ID_FIELD] || update_id
   abort("PUT failed (HTTP #{resp.code}): #{parsed.inspect}") unless resp.is_a?(Net::HTTPSuccess)
   warn "PUT ok: #{ID_FIELD}=#{oid}"
 else
-  resp = http(:post, POST_PATH, File.read(opts[:spec]))
+  resp = http(:post, POST_PATH, wire_body(File.read(opts[:spec]), :create))
   parsed = YAML.safe_load(resp.body, permitted_classes: [Date, Time])
   oid = parsed.is_a?(Hash) ? parsed[ID_FIELD] : nil
   # Rec5 quarantine (opt-in): a POST killed by ONE broken element must not lose
@@ -185,7 +207,7 @@ else
       File.write(cleaned_path, JSON.pretty_generate(q[:spec]))
       warn "QUARANTINE: POST failed naming #{found[:ids].size} element(s) — deferred to #{DEFERRED_PATH}; re-POSTing ONCE without them (#{cleaned_path})"
       found[:ids].each { |id| warn "  - #{id}: #{found[:reasons][id]}" }
-      resp = http(:post, POST_PATH, File.read(cleaned_path))
+      resp = http(:post, POST_PATH, wire_body(File.read(cleaned_path), :create))
       parsed = YAML.safe_load(resp.body, permitted_classes: [Date, Time])
       oid = parsed.is_a?(Hash) ? parsed[ID_FIELD] : nil
       abort("POST failed AGAIN after quarantining #{found[:ids].size} element(s) — not a single-element failure. " \
@@ -217,7 +239,7 @@ columns_path = opts[:type] == 'datamodel' ?
   "/v2/dataModels/#{oid}/columns" :
   "/v2/workbooks/#{oid}/columns"
 readback = lambda do
-  spec = JSON.parse(http(:get, format(GET_PATH, oid), accept_json: true).body)
+  spec = readback_spec(JSON.parse(http(:get, format(GET_PATH, oid), accept_json: true).body))
   cols_res = http(:get, columns_path, accept_json: true)
   cols_json = cols_res.is_a?(Net::HTTPSuccess) ? (JSON.parse(cols_res.body) rescue { 'entries' => [] }) : nil
   labels_by_el = Hash.new { |h, k| h[k] = [] }
@@ -251,7 +273,7 @@ if QUARANTINE && $quarantined.nil? && cols_res.is_a?(Net::HTTPSuccess)
       warn "QUARANTINE: column census flagged #{found[:ids].size} element(s) — deferred to #{DEFERRED_PATH}; " \
            "re-PUTting the remaining spec to #{ID_FIELD}=#{oid} (#{cleaned_path})"
       found[:ids].each { |id| warn "  - #{id}: #{found[:reasons][id]}" }
-      put_res = http(:put, format(GET_PATH, oid), File.read(cleaned_path))
+      put_res = http(:put, format(PUT_PATH, oid), wire_body(File.read(cleaned_path), :update))
       abort("re-PUT after quarantine failed (HTTP #{put_res.code}): #{put_res.body.to_s[0, 500]} — " \
             "deferred file kept: #{DEFERRED_PATH}") unless put_res.is_a?(Net::HTTPSuccess)
       spec, cols_res, cols_json, labels_by_el = readback.call
@@ -407,7 +429,7 @@ if opts[:type] == 'workbook' && !opts[:skip_lint]
     violations.each { |v| warn "  - #{v}" }
     warn 'Fix the spec/layout and re-PUT before continuing: raw-id names -> derive human'
     warn 'titles; loose controls -> control band or the chart container; dead zones ->'
-    warn 're-band the page. The workbook DID post — fix with PUT /v2/workbooks/<id>/spec'
+    warn 're-band the page. The workbook DID post — fix with PUT /v2/workbooks/<id>/contents'
     warn '(re-POSTing creates an orphan).'
     warn '========================================'
     exit(3)
@@ -443,7 +465,7 @@ if opts[:type] == 'workbook' && !opts[:skip_control_lint]
     warn 'filters targets ({source:{elementId}, columnId}) or remove the control;'
     warn 'partial reach -> wire the uncovered elements or annotate controlScope in'
     warn 'control-scope.json (see scripts/lib/control_lint.rb CONTRACT). The workbook'
-    warn 'DID post — fix with PUT /v2/workbooks/<id>/spec (re-POSTing creates an orphan).'
+    warn 'DID post — fix with PUT /v2/workbooks/<id>/contents (re-POSTing creates an orphan).'
     warn '========================================'
     exit(4)
   end
