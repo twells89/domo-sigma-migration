@@ -46,7 +46,11 @@ module WorkbookEndpoints
     pages = Array(contents['pages'])
     nested_elements = pages.flat_map { |page| Array(page['elements']) }
     contents['pages'] = pages.map { |page| page.reject { |key, _| key == 'elements' } }
-    contents['elements'] = nested_elements unless nested_elements.empty? && contents.key?('elements')
+    unless nested_elements.empty?
+      nested_ids = nested_elements.each_with_object({}) { |element, ids| ids[element['id']] = true }
+      unassigned = Array(contents['elements']).reject { |element| nested_ids.key?(element['id']) }
+      contents['elements'] = nested_elements + unassigned
+    end
     contents['elements'] ||= []
     contents['kind'] ||= 'workbook'
 

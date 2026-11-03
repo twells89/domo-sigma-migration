@@ -50,6 +50,11 @@ eq W.contents_of(flat).key?('pages'), true, 'contents_of keeps a flat spec as is
 eq W.legacy_spec({ 'contents' => current })['pages'][0]['elements'], [{ 'id' => 'e' }],
    'legacy_spec assigns flat elements to pages from layout'
 
+partially_assigned = current.merge('elements' => current['elements'] + [{ 'id' => 'unassigned' }])
+legacy = W.legacy_spec({ 'contents' => partially_assigned })
+legacy['pages'][0]['elements'] << { 'id' => 'injected' }
+eq W.wire_contents(legacy)['elements'], [{ 'id' => 'e' }, { 'id' => 'injected' }, { 'id' => 'unassigned' }],
+   'wire_contents preserves flat elements not assigned to a page'
 
 scripts = File.expand_path('../scripts', __dir__)
 deprecated = /workbooks(?:\/\{[^}]*\}|\/#\{[^}]*\}|\/%s)?\/spec\b/
