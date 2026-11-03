@@ -11,7 +11,11 @@ def eq(a, b, m) if a == b then puts "  ok: #{m}" else $failures += 1; puts "  FA
 
 W = WorkbookEndpoints
 flat = { 'name' => 'N', 'folderId' => 'F', 'description' => 'D', 'schemaVersion' => 1,
-         'pages' => [{ 'id' => 'p' }], 'layout' => '<Page/>' }
+         'pages' => [{ 'id' => 'p', 'name' => 'Page', 'elements' => [{ 'id' => 'e' }] }],
+         'layout' => '<Page id="p"><LayoutElement elementId="e"/></Page>',
+         'themeName' => 'Light',
+         'themeOverrides' => { 'categoricalScheme' => %w[#111111 #222222],
+                               'colorOverrides' => { 'backgroundCanvas' => '#ffffff' } } }
 
 eq W.create_path, '/v2/workbooks', 'create path'
 eq W.read_path('w1'), '/v2/workbooks/w1?includeContents=true', 'read path asks for contents'
@@ -19,17 +23,32 @@ eq W.update_path('w1'), '/v2/workbooks/w1/contents', 'update path'
 
 body = W.create_body(flat)
 eq body.keys.sort, %w[contents description folderId name], 'create body: metadata beside contents'
-eq body['contents'].keys.sort, %w[layout pages schemaVersion], 'create body: contents holds the document only'
+eq body['contents'].keys.sort, %w[elements kind layout pages schemaVersion settings], 'create body: contents uses the current document shape'
+eq body['contents']['pages'], [{ 'id' => 'p', 'name' => 'Page' }], 'create body: pages contain metadata only'
+eq body['contents']['elements'], [{ 'id' => 'e' }], 'create body: elements are flattened'
+eq body['contents']['kind'], 'workbook', 'create body: document kind is workbook'
+eq body['contents'].dig('settings', 'theme'),
+   { 'name' => 'Light',
+     'overrides' => { 'categoricalScheme' => %w[#111111 #222222],
+                      'colorOverrides' => [{ 'name' => 'backgroundCanvas', 'color' => '#ffffff' }] } },
+   'create body: legacy theme fields move under settings'
 eq W.create_body(flat, dry_run: true)['dryRun'], true, 'dry run flag'
-eq W.create_body({ 'name' => 'N', 'document' => { 'pages' => [] } })['contents'], { 'pages' => [] }, 'a document wrapper is re-keyed to contents'
+eq W.create_body({ 'name' => 'N', 'document' => { 'pages' => [] } })['contents'],
+   { 'pages' => [], 'elements' => [], 'kind' => 'workbook' }, 'a document wrapper is normalized as contents'
 
 upd = W.update_body(flat, document_version: 4)
-eq upd, { 'contents' => { 'schemaVersion' => 1, 'pages' => [{ 'id' => 'p' }], 'layout' => '<Page/>' }, 'documentVersion' => 4 },
+eq upd, { 'contents' => body['contents'], 'documentVersion' => 4 },
    'update body: no name/folderId, optional documentVersion'
 eq W.update_body(flat).key?('documentVersion'), false, 'update body omits an unset documentVersion'
 
-eq W.contents_of({ 'workbookId' => 'w', 'contents' => { 'pages' => [1] } }), { 'pages' => [1] }, 'contents_of unwraps a read'
+current = { 'schemaVersion' => 1, 'kind' => 'workbook',
+            'pages' => [{ 'id' => 'p', 'name' => 'Page' }],
+            'elements' => [{ 'id' => 'e' }],
+            'layout' => '<Page id="p"><GridContainer elementId="c"><LayoutElement elementId="e"/></GridContainer></Page>' }
+eq W.contents_of({ 'workbookId' => 'w', 'contents' => current }), current, 'contents_of unwraps a read'
 eq W.contents_of(flat).key?('pages'), true, 'contents_of keeps a flat spec as is'
+eq W.legacy_spec({ 'contents' => current })['pages'][0]['elements'], [{ 'id' => 'e' }],
+   'legacy_spec assigns flat elements to pages from layout'
 
 
 scripts = File.expand_path('../scripts', __dir__)

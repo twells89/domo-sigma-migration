@@ -88,7 +88,7 @@ end
 # Parsed readback → the flat spec the checks below work on (workbook documents
 # come back under `contents`).
 def readback_spec(parsed)
-  DATA_MODEL ? parsed : WorkbookEndpoints.contents_of(parsed)
+  DATA_MODEL ? parsed : WorkbookEndpoints.legacy_spec(parsed)
 end
 
 # Wraps a single Sigma REST call with automatic 401-retry-after-refresh

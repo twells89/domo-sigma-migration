@@ -155,6 +155,7 @@ require 'net/http'
 require 'uri'
 require 'optparse'
 require 'rbconfig'
+require_relative 'lib/workbook_endpoints'
 
 opts = { min_pass_rate: 1.0, allow_extract: false, min_layout_elements: 2,
          allow_missing_tiles: 0, min_parity_score: 0.0, min_grid_fill: 0.45 }
@@ -461,7 +462,7 @@ unless opts[:skip_layout]
             require 'date'
             YAML.safe_load(body, permitted_classes: [Date, Time]) || {}
           end
-          spec = spec['contents'] if spec.is_a?(Hash) && spec['contents'].is_a?(Hash) # the document is under `contents`
+          spec = WorkbookEndpoints.legacy_spec(spec)
         layout_xml = spec['layout'].to_s
         elem_count = layout_xml.scan(/<LayoutElement\b/).length
         live_layout_positioned = elem_count
@@ -606,7 +607,7 @@ else
             require 'date'
             YAML.safe_load(res.body, permitted_classes: [Date, Time]) || {}
           end
-          spec = spec['contents'] if spec.is_a?(Hash) && spec['contents'].is_a?(Hash) # the document is under `contents`
+          spec = WorkbookEndpoints.legacy_spec(spec)
         violations = LayoutLint.lint(spec)
         if violations.any?
           warn "[FAIL] gate 6/7: layout lint — #{violations.length} violation(s) on live workbook #{wb_id}:"
@@ -673,7 +674,7 @@ else
             require 'date'
             YAML.safe_load(res.body, permitted_classes: [Date, Time]) || {}
           end
-          spec = spec['contents'] if spec.is_a?(Hash) && spec['contents'].is_a?(Hash) # the document is under `contents`
+          spec = WorkbookEndpoints.legacy_spec(spec)
         scope_path = opts[:control_scope] || File.join(opts[:tab], 'control-scope.json')
         scope = nil
         if File.exist?(scope_path)

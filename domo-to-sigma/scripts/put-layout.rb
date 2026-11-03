@@ -56,9 +56,9 @@ xml = File.read(opts[:layout], encoding: 'UTF-8')
 abort "FATAL: empty elementId in layout XML" if xml.match?(/elementId=""/)
 
 # The read returns the document under `contents` (GET .../spec is deprecated);
-# keep the documentVersion so the PUT fails on a concurrent edit instead of overwriting it.
+# send its latestVersion as documentVersion so the PUT fails on a concurrent edit.
 raw  = JSON.parse(http(:get, WorkbookEndpoints.read_path(opts[:wb])).body)
-spec = WorkbookEndpoints.contents_of(raw)
+spec = WorkbookEndpoints.legacy_spec(raw)
 spec['pages'].each { |p| p.delete('layout') }
 spec['layout'] = xml
 
@@ -85,7 +85,12 @@ if File.exist?(elements_path)
 end
 # `spec` is the document only (no envelope fields); PUT /contents takes {contents, documentVersion}.
 resp = http(:put, WorkbookEndpoints.update_path(opts[:wb]),
-            JSON.pretty_generate(WorkbookEndpoints.update_body(spec, document_version: raw['documentVersion'])))
+            JSON.pretty_generate(WorkbookEndpoints.update_body(spec, document_version: raw['latestVersion'])))
 parsed = YAML.safe_load(resp.body, permitted_classes: [Date, Time])
-puts parsed['workbookId'] ? "PUT ok: workbookId=#{parsed['workbookId']}" : "ERROR: #{parsed.inspect}"
-exit(parsed['workbookId'] ? 0 : 1)
+if resp.is_a?(Net::HTTPSuccess)
+  workbook_id = parsed.is_a?(Hash) ? parsed['workbookId'] || opts[:wb] : opts[:wb]
+  puts "PUT ok: workbookId=#{workbook_id}"
+  exit 0
+end
+puts "ERROR: #{parsed.inspect}"
+exit 1
